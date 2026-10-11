@@ -5,9 +5,9 @@ all: proto build
 
 # Build binaries
 build:
-	@echo "Building ax..."
+	@echo "Building conductor..."
 	@mkdir -p bin
-	@go build -o bin/ax ./cmd/ax
+	@go build -o bin/conductor ./cmd/conductor
 	@echo "Build complete!"
 
 
@@ -43,10 +43,10 @@ clean:
 	@rm -rf eventlog/
 	@echo "Clean complete!"
 
-# Install ax to GOPATH/bin
+# Install conductor to GOPATH/bin
 install:
-	@echo "Installing ax..."
-	@go install ./cmd/ax
+	@echo "Installing conductor..."
+	@go install ./cmd/conductor
 	@echo "Install complete!"
 
 # Install dependencies

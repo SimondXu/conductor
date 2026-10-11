@@ -468,7 +468,7 @@ def main():
     )
     parser.add_argument(
         "--state-dir",
-        default=str(pathlib.Path.home() / ".ax" / "antigravity" / "conversations"),
+        default=str(pathlib.Path.home() / ".conductor" / "antigravity" / "conversations"),
         help="Base directory for per-conversation trajectory storage",
     )
     args = parser.parse_args()

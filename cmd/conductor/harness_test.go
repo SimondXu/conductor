@@ -37,7 +37,7 @@ func TestSetHarnessWorkDir(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chdir(orig) })
 
 	t.Run("unset leaves the working directory unchanged", func(t *testing.T) {
-		t.Setenv("AX_HARNESS_WORKDIR", "")
+		t.Setenv("CONDUCTOR_HARNESS_WORKDIR", "")
 		before, _ := os.Getwd()
 		if err := setHarnessWorkDir(); err != nil {
 			t.Fatalf("setHarnessWorkDir: %v", err)
@@ -50,7 +50,7 @@ func TestSetHarnessWorkDir(t *testing.T) {
 
 	t.Run("set changes the working directory", func(t *testing.T) {
 		dir := t.TempDir()
-		t.Setenv("AX_HARNESS_WORKDIR", dir)
+		t.Setenv("CONDUCTOR_HARNESS_WORKDIR", dir)
 		if err := setHarnessWorkDir(); err != nil {
 			t.Fatalf("setHarnessWorkDir: %v", err)
 		}
@@ -67,7 +67,7 @@ func TestSetHarnessWorkDir(t *testing.T) {
 
 	t.Run("missing directory is created", func(t *testing.T) {
 		dir := filepath.Join(t.TempDir(), "created", "workdir")
-		t.Setenv("AX_HARNESS_WORKDIR", dir)
+		t.Setenv("CONDUCTOR_HARNESS_WORKDIR", dir)
 		if err := setHarnessWorkDir(); err != nil {
 			t.Fatalf("setHarnessWorkDir: %v", err)
 		}

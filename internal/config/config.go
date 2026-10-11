@@ -28,7 +28,7 @@ import (
 
 const (
 	// The substrate namespace reserved for AX's built-in harnesses.
-	defaultNamespace = "ax"
+	defaultNamespace = "conductor"
 	// The port for harnesses running as substrate actors. Substrate's
 	// actor networking DNATs inbound workerPodIP:80 to the actor.
 	substrateDefaultPort = 80
@@ -37,10 +37,10 @@ const (
 	AntigravityInteractionsHarnessID = "antigravity-interactions"
 	// AntigravityHarnessTemplate is the substrate ActorTemplate that runs the
 	// Antigravity harness.
-	AntigravityHarnessTemplate = "ax-harness-antigravity-template"
+	AntigravityHarnessTemplate = "conductor-harness-antigravity-template"
 	// AntigravityInteractionsTemplate is the substrate ActorTemplate that runs
 	// the Antigravity Interactions harness.
-	AntigravityInteractionsTemplate = "ax-harness-interactions-template"
+	AntigravityInteractionsTemplate = "conductor-harness-interactions-template"
 )
 
 // Config represents the main configuration for the AX harness server.
@@ -251,7 +251,7 @@ type SkillRefConfig struct {
 // from a user-provided container image.
 type SubstrateHarnessConfig struct {
 	ID        string `yaml:"id"`                // Unique harness identifier
-	Namespace string `yaml:"namespace"`         // ActorTemplate namespace (user-owned, not "ax")
+	Namespace string `yaml:"namespace"`         // ActorTemplate namespace (user-owned, not "conductor")
 	Template  string `yaml:"template"`          // ActorTemplate name
 	Port      int    `yaml:"port,omitempty"`    // HarnessService port
 	Default   bool   `yaml:"default,omitempty"` // Default harness or not
@@ -363,13 +363,13 @@ func (c *Config) Validate() error {
 	return nil
 }
 
-func AXAssetsDir() (string, error) {
-	if dir := os.Getenv("AX_DURABLE_DIR"); dir != "" {
-		return filepath.Join(dir, ".ax"), nil
+func AssetsDir() (string, error) {
+	if dir := os.Getenv("CONDUCTOR_DURABLE_DIR"); dir != "" {
+		return filepath.Join(dir, ".conductor"), nil
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("resolving home directory: %w", err)
 	}
-	return filepath.Join(home, ".ax"), nil
+	return filepath.Join(home, ".conductor"), nil
 }

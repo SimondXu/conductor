@@ -17,12 +17,12 @@
 # ---------------------------------------------------------------------------
 # Namespaces
 # ---------------------------------------------------------------------------
-# Namespace "ax" is reserved for built-in harnesses. Users who bring their own
+# Namespace "conductor" is reserved for built-in harnesses. Users who bring their own
 # harness images should add their own namespaces.
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: ax
+  name: conductor
 ---
 # ---------------------------------------------------------------------------
 # Built-in harnesses
@@ -30,10 +30,10 @@ metadata:
 apiVersion: ate.dev/v1alpha1
 kind: WorkerPool
 metadata:
-  name: ax-harness-workerpool
-  namespace: ax
+  name: conductor-harness-workerpool
+  namespace: conductor
   labels:
-    workload: ax-harness
+    workload: conductor-harness
 spec:
   replicas: 5
   ateomImage: ${ATEOM_IMAGE}
@@ -41,12 +41,12 @@ spec:
 apiVersion: ate.dev/v1alpha1
 kind: ActorTemplate
 metadata:
-  name: ax-harness-antigravity-template
-  namespace: ax
+  name: conductor-harness-antigravity-template
+  namespace: conductor
 spec:
   workerSelector:
     matchLabels:
-      workload: ax-harness
+      workload: conductor-harness
   pauseImage: "gcr.io/gke-release/pause@sha256:bcbd57ba5653580ec647b16d8163cdd1112df3609129b01f912a8032e48265da"
   containers:
     - name: "axantigravity"
@@ -55,18 +55,18 @@ spec:
       # environment are specified here. `ax harness antigravity` forks the
       # Antigravity Python sidecar, which serves on port 80 because substrate
       # DNATs workerPodIP:80.
-      command: ["/ax-app/ax", "harness", "antigravity",
+      command: ["/conductor-app/conductor", "harness", "antigravity",
                 "--host", "0.0.0.0", "--port", "80"]
       env:
         - name: GEMINI_API_KEY
           value: "${GEMINI_API_KEY}"
         - name: PYTHONPATH
-          value: "/ax-app:/ax-app/python"
+          value: "/conductor-app:/conductor-app/python"
         - name: PYTHONUNBUFFERED
           value: "1"
         - name: SKILLS_DIR
           value: "/ax/skills"
-        - name: AX_HARNESS_WORKDIR
+        - name: CONDUCTOR_HARNESS_WORKDIR
           value: "/workspace"
       readyz:
         httpGet:
@@ -78,12 +78,12 @@ spec:
 apiVersion: ate.dev/v1alpha1
 kind: ActorTemplate
 metadata:
-  name: ax-harness-interactions-template
-  namespace: ax
+  name: conductor-harness-interactions-template
+  namespace: conductor
 spec:
   workerSelector:
     matchLabels:
-      workload: ax-harness
+      workload: conductor-harness
   pauseImage: "gcr.io/gke-release/pause@sha256:bcbd57ba5653580ec647b16d8163cdd1112df3609129b01f912a8032e48265da"
   containers:
     - name: "axinteractions"
@@ -91,18 +91,18 @@ spec:
       # Substrate ignores the image CMD/ENV/WORKDIR, so the harness command and
       # environment are specified here. `ax harness antigravity-interactions` runs
       # the Go Interactions harness on port 80 because substrate DNATs workerPodIP:80.
-      command: ["/ax-app/ax", "harness", "antigravity-interactions",
+      command: ["/conductor-app/conductor", "harness", "antigravity-interactions",
                 "--host", "0.0.0.0", "--port", "80"]
       env:
         - name: GOOGLE_CLOUD_PROJECT
           value: "${GOOGLE_CLOUD_PROJECT}"
-        - name: AX_HARNESS_WORKDIR
+        - name: CONDUCTOR_HARNESS_WORKDIR
           value: "/durable/workspace"
-        - name: AX_DURABLE_DIR
+        - name: CONDUCTOR_DURABLE_DIR
           value: "/durable"
         # Content of manifests/ax.yaml
-        - name: AX_CONFIG_CONTENT
-          value: "${AX_CONFIG_CONTENT}"
+        - name: CONDUCTOR_CONFIG_CONTENT
+          value: "${CONDUCTOR_CONFIG_CONTENT}"
       readyz:
         httpGet:
           path: /readyz
@@ -126,7 +126,7 @@ apiVersion: apps/v1
 kind: ReplicaSet
 metadata:
   name: ax-server
-  namespace: ax
+  namespace: conductor
   labels:
     app: ax-server
 spec:
@@ -142,13 +142,13 @@ spec:
       containers:
         - name: ax-server
           image: ${AX_IMAGE}
-          command: ["/ax-app/ax", "serve", "--config", "/etc/ax/ax.yaml"]
+          command: ["/conductor-app/conductor", "serve", "--config", "/etc/ax/ax.yaml"]
           ports:
             - containerPort: 8494
           env:
             - name: GEMINI_API_KEY
               value: "${GEMINI_API_KEY}"
-            - name: AX_SUBSTRATE
+            - name: CONDUCTOR_SUBSTRATE
               value: "1"
             - name: AX_EVENTLOG_DSN
               valueFrom:

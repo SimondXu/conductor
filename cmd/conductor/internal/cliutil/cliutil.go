@@ -54,16 +54,16 @@ func DefaultConfig() *Config {
 func NewControllerFromConfig(ctx context.Context, cfg *Config) (*controller.Controller, error) {
 	reg := controller.NewRegistry()
 
-	// AX_SUBSTRATE selects how built-in harnesses run: locally (unset) or as
+	// CONDUCTOR_SUBSTRATE selects how built-in harnesses run: locally (unset) or as
 	// substrate actors ("1").
-	substrateMode := os.Getenv("AX_SUBSTRATE") == "1"
+	substrateMode := os.Getenv("CONDUCTOR_SUBSTRATE") == "1"
 
 	// Validate config before local-mode antigravity.New forks the Python
 	// sidecar, so a config error surfaces without spawning a subprocess.
 	// Validate config before local-mode antigravity.New forks the Python
 	// sidecar, so a config error surfaces without spawning a subprocess.
 	if len(cfg.Registry.Substrate) > 0 && !substrateMode {
-		return nil, fmt.Errorf("custom substrate harnesses require AX_SUBSTRATE=1")
+		return nil, fmt.Errorf("custom substrate harnesses require CONDUCTOR_SUBSTRATE=1")
 	}
 
 	var defaultHarnessID string
@@ -143,9 +143,9 @@ func NewControllerFromConfig(ctx context.Context, cfg *Config) (*controller.Cont
 		}
 		// WorkDir is the agent's working directory, authoritative for built-in env
 		// tools (see AntigravityInteractionsConfig.WorkDir). Mirrors the substrate
-		// path (cmd/ax harness): sourced from AX_HARNESS_WORKDIR, empty falls back
+		// path (cmd/ax harness): sourced from CONDUCTOR_HARNESS_WORKDIR, empty falls back
 		// to the process cwd.
-		workDir := os.Getenv("AX_HARNESS_WORKDIR")
+		workDir := os.Getenv("CONDUCTOR_HARNESS_WORKDIR")
 		// skillsPointer was built once, up front, from the top-level skills
 		// config (see above). Append it, plus the workspace pointer, to any
 		// configured system instruction.

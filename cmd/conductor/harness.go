@@ -62,11 +62,11 @@ func init() {
 	rootCmd.AddCommand(harnessCmd)
 }
 
-// setHarnessWorkDir changes the process working directory to AX_HARNESS_WORKDIR
+// setHarnessWorkDir changes the process working directory to CONDUCTOR_HARNESS_WORKDIR
 // when it is set. The forked Python sidecar inherits it, which scopes the agent's
 // default workspace (os.getcwd()) away from its own source tree.
 func setHarnessWorkDir() error {
-	dir := os.Getenv("AX_HARNESS_WORKDIR")
+	dir := os.Getenv("CONDUCTOR_HARNESS_WORKDIR")
 	if dir == "" {
 		return nil
 	}
@@ -156,14 +156,14 @@ func runAntigravityInteractionsHarness(ctx context.Context) error {
 		return err
 	}
 
-	// Read harness config from ax.yaml handed to the actor via AX_CONFIG_CONTENT.
+	// Read harness config from ax.yaml handed to the actor via CONDUCTOR_CONFIG_CONTENT.
 	// Fall back to built-in defaults.
 	var hc config.AntigravityInteractionsHarnessConfig
-	if raw := os.Getenv("AX_CONFIG_CONTENT"); raw != "" {
+	if raw := os.Getenv("CONDUCTOR_CONFIG_CONTENT"); raw != "" {
 		if data, err := base64.StdEncoding.DecodeString(raw); err != nil {
-			log.Printf("AX_CONFIG_CONTENT: base64 decode failed, using defaults: %v", err)
+			log.Printf("CONDUCTOR_CONFIG_CONTENT: base64 decode failed, using defaults: %v", err)
 		} else if cfg, err := config.LoadFromBytes(data); err != nil {
-			log.Printf("AX_CONFIG_CONTENT: parse failed, using defaults: %v", err)
+			log.Printf("CONDUCTOR_CONFIG_CONTENT: parse failed, using defaults: %v", err)
 		} else {
 			hc = cfg.Registry.AntigravityInteractions
 		}
@@ -182,7 +182,7 @@ func runAntigravityInteractionsHarness(ctx context.Context) error {
 	// WorkDir is the agent's working directory. It is authoritative for built-in
 	// env tools (see AntigravityInteractionsConfig.WorkDir) so their execution
 	// does not depend on the process cwd. Empty falls back to the process cwd.
-	workDir := os.Getenv("AX_HARNESS_WORKDIR")
+	workDir := os.Getenv("CONDUCTOR_HARNESS_WORKDIR")
 
 	cfg := antigravityinteractions.AntigravityInteractionsConfig{
 		Agent:             agent,

@@ -61,10 +61,10 @@ func New(harnessID string, endpoint string, namespace string, template string, p
 		port = 50053 // Default HarnessService port
 	}
 	if namespace == "" {
-		namespace = "ax"
+		namespace = "conductor"
 	}
 	if template == "" {
-		template = "ax-harness-antigravity-template"
+		template = "conductor-harness-antigravity-template"
 	}
 	controlCreds := grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{InsecureSkipVerify: true}))
 	client, err := ate.NewClient(namespace, template, endpoint, controlCreds)

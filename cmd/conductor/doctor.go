@@ -37,11 +37,11 @@ var doctorEndpoint string
 
 var doctorCmd = &cobra.Command{
 	Use:   "doctor",
-	Short: "Diagnose and display health of the AX runtime, sidecar process, and system metrics",
+	Short: "Diagnose and display health of the Conductor runtime, sidecar process, and system metrics",
 	Long: `Display the current diagnostic status of:
 - Python sidecar process (PID, CPU, Memory RSS, Uptime, Command)
 - gRPC harness endpoint connectivity
-- AX config/assets directory status
+- Conductor config/assets directory status
 - Go runtime memory and goroutines`,
 	SilenceUsage: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -103,7 +103,7 @@ func (s *Sampler) Sample() Stats {
 	st.MemAllocMB = float64(m.Alloc) / (1024 * 1024)
 
 	// 1. Assets dir
-	assetsDir, err := config.AXAssetsDir()
+	assetsDir, err := config.AssetsDir()
 	if err == nil {
 		st.AssetsDir = assetsDir
 		if entries, err := os.ReadDir(assetsDir); err == nil {

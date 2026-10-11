@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// AX is a server for managing agent orchestrator tasks.
+// Conductor is a server for managing agent orchestrator tasks.
 // It provides commands to execute tasks, resume from checkpoints,
 // register agents, and run the controller server.
 package main
@@ -22,7 +22,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/simondxu/conductor/cmd/ax/internal/cliutil"
+	"github.com/simondxu/conductor/cmd/conductor/internal/cliutil"
 	"github.com/spf13/cobra"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -36,7 +36,7 @@ func main() {
 }
 
 var rootCmd = &cobra.Command{
-	Use:   "ax",
+	Use:   "conductor",
 	Short: "Execute a conversation or resume an existing one",
 	Long: `Execute a new conversation or resume an existing one.
 If no conversation ID is provided, a new UUID will be generated.`,
@@ -65,10 +65,24 @@ func connect(server string) (*grpc.ClientConn, error) {
 
 const currentVersion = "v1alpha"
 
+const (
+	defaultConfigFile = "conductor.yaml"
+	// legacyConfigFile is read when defaultConfigFile is absent, for one
+	// release after the rename from ax.
+	legacyConfigFile = "ax.yaml"
+)
+
 func newConfig(cmd *cobra.Command, configFile string) (*cliutil.Config, error) {
-	cfg, err := cliutil.LoadFromFile(configFile)
 	configFlagChanged := (cmd.Flags().Lookup("config") != nil && cmd.Flags().Changed("config")) ||
 		(cmd.Flags().Lookup("agent-config-file") != nil && cmd.Flags().Changed("agent-config-file"))
+	if !configFlagChanged && configFile == defaultConfigFile {
+		if _, err := os.Stat(configFile); errors.Is(err, os.ErrNotExist) {
+			if _, err := os.Stat(legacyConfigFile); err == nil {
+				configFile = legacyConfigFile
+			}
+		}
+	}
+	cfg, err := cliutil.LoadFromFile(configFile)
 	if errors.Is(err, os.ErrNotExist) && !configFlagChanged {
 		cfg := cliutil.DefaultConfig()
 		cfg.Version = currentVersion

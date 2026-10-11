@@ -22,7 +22,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/simondxu/conductor/cmd/ax/internal/cliutil"
+	"github.com/simondxu/conductor/cmd/conductor/internal/cliutil"
 	"github.com/simondxu/conductor/internal/server"
 	"github.com/simondxu/conductor/internal/telemetry"
 	"github.com/spf13/cobra"
@@ -36,13 +36,13 @@ var (
 var serveCmd = &cobra.Command{
 	Use:   "serve",
 	Short: "Run controller as a gRPC server",
-	Long: `Run the AX controller as a gRPC server.
-Loads configuration from a YAML file (default: ax.yaml).`,
+	Long: `Run the Conductor controller as a gRPC server.
+Loads configuration from a YAML file (default: conductor.yaml; ax.yaml is still read when it is absent).`,
 	RunE: runServe,
 }
 
 func init() {
-	serveCmd.Flags().StringVar(&serveConfigFile, "config", "ax.yaml", "Path to YAML configuration file")
+	serveCmd.Flags().StringVar(&serveConfigFile, "config", defaultConfigFile, "Path to YAML configuration file")
 }
 
 func runServe(cmd *cobra.Command, args []string) error {
@@ -75,7 +75,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 			opts = append(opts, otlptracegrpc.WithInsecure())
 		}
 
-		shutdown, err := telemetry.SetTraceProvider(ctx, "ax-server", opts...)
+		shutdown, err := telemetry.SetTraceProvider(ctx, "conductor-server", opts...)
 		if err != nil {
 			return fmt.Errorf("failed to initialize telemetry: %w", err)
 		}
@@ -104,7 +104,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 		slog.InfoContext(ctx, "Received interrupt, shutting down...")
 		srv.GracefulStop()
 	}()
-	slog.InfoContext(ctx, "Starting AX server", slog.String("address", cfg.Server.Address))
+	slog.InfoContext(ctx, "Starting Conductor server", slog.String("address", cfg.Server.Address))
 	if err := srv.Serve(cfg.Server.Address); err != nil {
 		return fmt.Errorf("error serving: %w", err)
 	}

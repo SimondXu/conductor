@@ -41,7 +41,7 @@ func TestDoctorCommandRegistration(t *testing.T) {
 
 func TestSampler_NoSidecar(t *testing.T) {
 	tmpDir := t.TempDir()
-	t.Setenv("AX_DURABLE_DIR", tmpDir)
+	t.Setenv("CONDUCTOR_DURABLE_DIR", tmpDir)
 
 	sampler := NewSampler("127.0.0.1:0")
 	stats := sampler.Sample()
@@ -52,14 +52,14 @@ func TestSampler_NoSidecar(t *testing.T) {
 	if stats.SidecarPID != 0 {
 		t.Errorf("expected SidecarPID to be 0, got %d", stats.SidecarPID)
 	}
-	if stats.AssetsDir != filepath.Join(tmpDir, ".ax") {
-		t.Errorf("expected AssetsDir %s, got %s", filepath.Join(tmpDir, ".ax"), stats.AssetsDir)
+	if stats.AssetsDir != filepath.Join(tmpDir, ".conductor") {
+		t.Errorf("expected AssetsDir %s, got %s", filepath.Join(tmpDir, ".conductor"), stats.AssetsDir)
 	}
 }
 
 func TestSampler_WithActiveProcessAndEndpoint(t *testing.T) {
 	tmpDir := t.TempDir()
-	t.Setenv("AX_DURABLE_DIR", tmpDir)
+	t.Setenv("CONDUCTOR_DURABLE_DIR", tmpDir)
 
 	cmd := exec.Command("sleep", "10")
 	if err := cmd.Start(); err != nil {
@@ -70,7 +70,7 @@ func TestSampler_WithActiveProcessAndEndpoint(t *testing.T) {
 		_ = cmd.Wait()
 	}()
 
-	axDir := filepath.Join(tmpDir, ".ax")
+	axDir := filepath.Join(tmpDir, ".conductor")
 	if err := os.MkdirAll(axDir, 0755); err != nil {
 		t.Fatalf("failed to create axDir: %v", err)
 	}

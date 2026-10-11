@@ -24,7 +24,7 @@ import (
 )
 
 func TestNewControllerFromConfig_BuiltinSubstrate(t *testing.T) {
-	t.Setenv("AX_SUBSTRATE", "1")
+	t.Setenv("CONDUCTOR_SUBSTRATE", "1")
 
 	cfg := &config.Config{
 		EventLog: config.EventLogConfig{
@@ -50,7 +50,7 @@ func TestNewControllerFromConfig_BuiltinSubstrate(t *testing.T) {
 }
 
 func TestNewControllerFromConfig_InteractionsSubstrate(t *testing.T) {
-	t.Setenv("AX_SUBSTRATE", "1")
+	t.Setenv("CONDUCTOR_SUBSTRATE", "1")
 
 	cfg := &config.Config{
 		EventLog: config.EventLogConfig{
@@ -78,7 +78,7 @@ func TestNewControllerFromConfig_InteractionsSubstrate(t *testing.T) {
 }
 
 func TestNewControllerFromConfig_CustomHarnessRequiresSubstrateMode(t *testing.T) {
-	t.Setenv("AX_SUBSTRATE", "")
+	t.Setenv("CONDUCTOR_SUBSTRATE", "")
 
 	cfg := &config.Config{
 		EventLog: config.EventLogConfig{
@@ -95,15 +95,15 @@ func TestNewControllerFromConfig_CustomHarnessRequiresSubstrateMode(t *testing.T
 
 	_, err := NewControllerFromConfig(context.Background(), cfg)
 	if err == nil {
-		t.Fatal("expected error for custom substrate harness without AX_SUBSTRATE=1, got nil")
+		t.Fatal("expected error for custom substrate harness without CONDUCTOR_SUBSTRATE=1, got nil")
 	}
-	if !strings.Contains(err.Error(), "AX_SUBSTRATE=1") {
-		t.Errorf("expected error to mention AX_SUBSTRATE=1, got: %v", err)
+	if !strings.Contains(err.Error(), "CONDUCTOR_SUBSTRATE=1") {
+		t.Errorf("expected error to mention CONDUCTOR_SUBSTRATE=1, got: %v", err)
 	}
 }
 
 func TestNewControllerFromConfig_CustomHarnessInSubstrateMode(t *testing.T) {
-	t.Setenv("AX_SUBSTRATE", "1")
+	t.Setenv("CONDUCTOR_SUBSTRATE", "1")
 
 	cfg := &config.Config{
 		EventLog: config.EventLogConfig{

@@ -38,7 +38,7 @@ func Setup(ctx context.Context, opts SetupOptions) (string, error) {
 	if opts.FS == nil {
 		return "", fmt.Errorf("SetupOptions.FS cannot be nil")
 	}
-	axDir, err := config.AXAssetsDir()
+	axDir, err := config.AssetsDir()
 	if err != nil {
 		return "", err
 	}

@@ -43,13 +43,13 @@ var _ harness.Harness = (*AntigravityHarness)(nil)
 var _ harness.Execution = (*antigravityExecution)(nil)
 
 // DefaultStateDir returns the default trajectory storage directory,
-// ~/.ax/antigravity/conversations. AX owns this path so it stays a harness
+// ~/.conductor/antigravity/conversations. AX owns this path so it stays a harness
 // implementation detail rather than a user-facing ax.yaml knob. It lives
 // outside the agent's working directory on purpose: the working directory is
 // the agent's operating surface (it reads and edits files there), so AX's
 // internal state is kept separate to avoid the agent seeing or clobbering it.
 func DefaultStateDir() (string, error) {
-	axDir, err := config.AXAssetsDir()
+	axDir, err := config.AssetsDir()
 	if err != nil {
 		return "", err
 	}

@@ -26,8 +26,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/simondxu/conductor/cmd/ax/internal"
-	"github.com/simondxu/conductor/cmd/ax/internal/cliutil"
+	"github.com/simondxu/conductor/cmd/conductor/internal"
+	"github.com/simondxu/conductor/cmd/conductor/internal/cliutil"
 	"github.com/simondxu/conductor/proto"
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
@@ -45,8 +45,10 @@ var (
 )
 
 var execCmd = &cobra.Command{
-	Use:   "exec",
-	Short: "Execute a conversation or resume an existing one",
+	Use: "run",
+	// "exec" is kept as an alias for one release after the rename from ax.
+	Aliases: []string{"exec"},
+	Short:   "Execute a conversation or resume an existing one",
 	Long: `Execute a new conversation or resume an existing one.
 If no conversation ID is provided, a new UUID will be generated.`,
 	SilenceUsage: true,
@@ -59,8 +61,8 @@ func registerExecFlags(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&execAgentConfigFile, "agent-config-file", "", "Path to a JSON file with per-request agent configuration")
 	cmd.Flags().StringVar(&execAgentConfig, "agent-config", "", "Per-request agent configuration as an inline JSON string (mutually exclusive with --agent-config-file)")
 	cmd.Flags().StringVar(&execInput, "input", "", "Input message to send (optional)")
-	cmd.Flags().StringVar(&execServerAddr, "server", "", "gRPC controller server address (if specified, connects to remote server; otherwise runs with a local built-in AX server)")
-	cmd.Flags().StringVar(&execConfigFile, "config", "ax.yaml", "Path to YAML configuration file (only used with a local built-in AX server)")
+	cmd.Flags().StringVar(&execServerAddr, "server", "", "gRPC controller server address (if specified, connects to remote server; otherwise runs an in-process controller)")
+	cmd.Flags().StringVar(&execConfigFile, "config", defaultConfigFile, "Path to YAML configuration file (only used with an in-process controller)")
 	cmd.Flags().BoolVar(&execResume, "resume", false, "Resume a conversation without inputs")
 	cmd.MarkFlagsMutuallyExclusive("input", "resume")
 	cmd.MarkFlagsMutuallyExclusive("agent-config", "agent-config-file")
@@ -114,7 +116,7 @@ func runExec(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return err
 		}
-		// Validate configuration (matches `ax serve`).
+		// Validate configuration (matches `conductor serve`).
 		if err := cfg.Validate(); err != nil {
 			return fmt.Errorf("invalid configuration: %w", err)
 		}

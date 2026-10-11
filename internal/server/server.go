@@ -89,7 +89,7 @@ func (s *Server) Serve(address string, opts ...grpc.ServerOption) error {
 
 	// Register standard gRPC Health Check server.
 	hs := health.NewServer()
-	hs.SetServingStatus("AX", grpc_health_v1.HealthCheckResponse_SERVING)
+	hs.SetServingStatus("conductor", grpc_health_v1.HealthCheckResponse_SERVING)
 	grpc_health_v1.RegisterHealthServer(s.grpcServer, hs)
 
 	if err := s.grpcServer.Serve(lis); err != nil {
