@@ -22,6 +22,7 @@ import (
 	"log/slog"
 
 	"github.com/simondxu/conductor/internal/controller/eventlog"
+	"github.com/simondxu/conductor/internal/harness"
 	"github.com/simondxu/conductor/proto"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/types/known/structpb"
@@ -74,7 +75,7 @@ func (d *Controller) Exec(ctx context.Context, req *proto.CreateInteractionEvent
 	// TODO(anj): We need to consolidate agents and harness registration.
 	// Adding harness registration support temporarily.
 	l := newLogger(d.eventLog, req.ConversationId, req.AgentId)
-	state, storedHarnessID, err := l.ResumptionState(ctx)
+	state, storedHarnessID, history, err := l.ResumptionState(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to check resumption state: %w", err)
 	}
@@ -98,6 +99,10 @@ func (d *Controller) Exec(ctx context.Context, req *proto.CreateInteractionEvent
 	h, err := d.registry.Harness(harnessID)
 	if err != nil {
 		return fmt.Errorf("failed to get harness %q: %w", harnessID, err)
+	}
+
+	if d.registry.Recovery(harnessID) == RecoveryFull {
+		return execOwnedLoop(ctx, req, l, h, state, history, handler)
 	}
 
 	hhandler := &harnessHandler{
@@ -186,6 +191,75 @@ func (a *harnessHandler) OnComplete(ctx context.Context, execID string) error {
 	return nil
 }
 
+// maxOwnedLoopTurns bounds the turns of one Exec on a recovery:full harness,
+// so a model that never stops calling tools cannot loop forever.
+const maxOwnedLoopTurns = 100
+
+// execOwnedLoop drives a recovery:full harness with the owned-loop turn
+// protocol (docs/conductor/ARCHITECTURE.md §1.4): every Run receives the whole
+// history and performs one turn, and the controller loops until the history no
+// longer needs a turn.
+func execOwnedLoop(ctx context.Context, req *proto.CreateInteractionEvent, l *logger, h harness.Harness, state proto.State, history []*proto.Step, handler ExecHandler) error {
+	if len(req.Inputs) == 0 && state != proto.State_STATE_PENDING {
+		return nil
+	}
+	// Re-running a tool without the ledger could repeat an UNSAFE effect, so
+	// an unanswered call is left for the reconciler (M4) instead.
+	if calls := harness.UnansweredToolCalls(history); len(calls) > 0 {
+		return fmt.Errorf("conversation %q has %d unanswered tool call(s); resuming it needs the reconciler", req.ConversationId, len(calls))
+	}
+
+	if len(req.Inputs) > 0 {
+		if _, err := l.LogInputs(ctx, req.Inputs, req.AgentConfig); err != nil {
+			return fmt.Errorf("failed to log inputs: %w", err)
+		}
+		history = append(history, req.Inputs...)
+	}
+
+	exec, err := h.Start(ctx, req.ConversationId, req.AgentConfig)
+	if err != nil {
+		return fmt.Errorf("failed to start harness session: %w", err)
+	}
+	defer exec.Close(ctx)
+
+	th := &turnHandler{harnessHandler: harnessHandler{logger: l, execHandler: handler}}
+	for turn := 0; harness.NeedsTurn(history); turn++ {
+		if turn == maxOwnedLoopTurns {
+			return fmt.Errorf("harness did not finish within %d turns", maxOwnedLoopTurns)
+		}
+		th.emitted = nil
+		if err := exec.Queue(ctx, history...); err != nil {
+			return fmt.Errorf("failed to queue history: %w", err)
+		}
+		if err := exec.Run(ctx, th); err != nil {
+			return fmt.Errorf("harness execution failed: %w", err)
+		}
+		if len(th.emitted) == 0 {
+			return fmt.Errorf("harness turn %d produced no steps", turn)
+		}
+		history = append(history, th.emitted...)
+	}
+	if _, err := l.LogOutputs(ctx, nil, proto.State_STATE_COMPLETED); err != nil {
+		return fmt.Errorf("failed to log completion: %w", err)
+	}
+	return nil
+}
+
+// turnHandler logs and forwards each step of one owned-loop turn and records
+// it for the next turn's history. Completion is written once by
+// execOwnedLoop, not per turn.
+type turnHandler struct {
+	harnessHandler
+	emitted []*proto.Step
+}
+
+func (t *turnHandler) OnMessage(ctx context.Context, execID string, step *proto.Step) error {
+	t.emitted = append(t.emitted, step)
+	return t.harnessHandler.OnMessage(ctx, execID, step)
+}
+
+func (t *turnHandler) OnComplete(ctx context.Context, execID string) error { return nil }
+
 // Registry returns the agent registry.
 func (d *Controller) Registry() *Registry {
 	return d.registry
@@ -220,15 +294,17 @@ func newLogger(
 	}
 }
 
-// ResumptionState returns the conversation's current state and the harness it used.
-func (l *logger) ResumptionState(ctx context.Context) (proto.State, string, error) {
+// ResumptionState returns the conversation's current state, the harness it
+// used, and every step logged so far, in order.
+func (l *logger) ResumptionState(ctx context.Context) (proto.State, string, []*proto.Step, error) {
 	events, err := l.el.Events(ctx, l.conversationID)
 	if err != nil {
-		return proto.State_STATE_UNSPECIFIED, "", err
+		return proto.State_STATE_UNSPECIFIED, "", nil, err
 	}
 
 	var state proto.State
 	var harnessID string
+	var steps []*proto.Step
 	for _, ev := range events {
 		if harnessID == "" && ev.AgentId != "" {
 			harnessID = ev.AgentId
@@ -236,8 +312,9 @@ func (l *logger) ResumptionState(ctx context.Context) (proto.State, string, erro
 		if ev.State != proto.State_STATE_UNSPECIFIED {
 			state = ev.State
 		}
+		steps = append(steps, ev.Steps...)
 	}
-	return state, harnessID, nil
+	return state, harnessID, steps, nil
 }
 
 func (l *logger) LogInputs(ctx context.Context, steps []*proto.Step, agentConfig []byte) (int64, error) {

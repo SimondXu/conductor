@@ -103,6 +103,41 @@ project wrote itself.
 
 Full statement in `correctness.md` §0.3.
 
+### 1.4 The owned-loop turn protocol **[M1]**
+
+Decided during M1, because §1.3 and `PRD.md` §6.5 require that "Conductor, not
+the harness, decides when each tool runs" without saying how, and the
+`Harness` / `Execution` / `Handler` interfaces and `HarnessService` are frozen.
+
+A `recovery: full` harness is **stateless across `Run` calls** and performs
+**one turn per `Run`**:
+
+- The controller `Queue`s the **whole conversation history** (every logged
+  step, then the new inputs) before each `Run`.
+- If the history ends with `ToolCallStep`s that have no matching
+  `ToolResultStep` (by `call_id`), the turn is a **tool turn**: execute exactly
+  those calls and emit one `ToolResultStep` each.
+- Otherwise it is a **model turn**: emit thought/content steps and zero or more
+  `ToolCallStep`s.
+
+The controller loops while the history ends in a tool call, a tool result, or
+user input, and writes `STATE_COMPLETED` once, after the loop — not on each
+turn's `OnComplete`.
+
+Why this shape: the gap between two `Run` calls is the only point, under the
+frozen interfaces, where the controller can act **before** a tool runs. It is
+where the ledger's `PLANNED` → `STARTED` writes, the I8 budget check and the
+fencing check go (M3/M7). It works unchanged in-process and over
+`HarnessService` (each `Run` is one `Connect` whose `start` carries the
+history), so tools still execute inside the execution environment and
+`harness_kill` mid-tool stays meaningful. Recovery is the same loop with history
+rebuilt from the log (§6.1).
+
+Until the reconciler lands (M4), a resumed conversation whose history ends in
+an unanswered tool call is refused rather than re-executed: re-running an
+`UNSAFE` call without the ledger would be exactly the duplicate effect the
+project exists to prevent.
+
 ---
 
 ## 2. Data model
