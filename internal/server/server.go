@@ -30,8 +30,8 @@ import (
 	"google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/status"
 
-	"github.com/google/ax/internal/controller"
-	"github.com/google/ax/proto"
+	"github.com/simondxu/conductor/internal/controller"
+	"github.com/simondxu/conductor/proto"
 )
 
 // Server implements the AXService gRPC service.

@@ -26,9 +26,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/google/ax/cmd/ax/internal"
-	"github.com/google/ax/cmd/ax/internal/cliutil"
-	"github.com/google/ax/proto"
+	"github.com/simondxu/conductor/cmd/ax/internal"
+	"github.com/simondxu/conductor/cmd/ax/internal/cliutil"
+	"github.com/simondxu/conductor/proto"
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 )

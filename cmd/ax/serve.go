@@ -22,9 +22,9 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/google/ax/cmd/ax/internal/cliutil"
-	"github.com/google/ax/internal/server"
-	"github.com/google/ax/internal/telemetry"
+	"github.com/simondxu/conductor/cmd/ax/internal/cliutil"
+	"github.com/simondxu/conductor/internal/server"
+	"github.com/simondxu/conductor/internal/telemetry"
 	"github.com/spf13/cobra"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 )

@@ -30,11 +30,11 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
-	"github.com/google/ax/internal/config"
-	"github.com/google/ax/internal/harness"
-	"github.com/google/ax/internal/pythonsidecar"
-	"github.com/google/ax/proto"
-	"github.com/google/ax/python"
+	"github.com/simondxu/conductor/internal/config"
+	"github.com/simondxu/conductor/internal/harness"
+	"github.com/simondxu/conductor/internal/pythonsidecar"
+	"github.com/simondxu/conductor/proto"
+	"github.com/simondxu/conductor/python"
 	"github.com/google/uuid"
 )
 

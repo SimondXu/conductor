@@ -15,7 +15,7 @@
 package main
 
 import (
-	"github.com/google/ax/internal/telemetry"
+	"github.com/simondxu/conductor/internal/telemetry"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 )
 

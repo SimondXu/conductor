@@ -30,8 +30,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/google/ax/internal/config"
-	"github.com/google/ax/internal/skills"
+	"github.com/simondxu/conductor/internal/config"
+	"github.com/simondxu/conductor/internal/skills"
 )
 
 // skillManifest is the file that marks a subdirectory as a skill.

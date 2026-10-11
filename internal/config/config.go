@@ -21,8 +21,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/google/ax/internal/harness"
-	"github.com/google/ax/internal/harness/substrate"
+	"github.com/simondxu/conductor/internal/harness"
+	"github.com/simondxu/conductor/internal/harness/substrate"
 	"gopkg.in/yaml.v3"
 )
 

@@ -25,7 +25,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/google/ax/internal/harness/harnesstest"
+	"github.com/simondxu/conductor/internal/harness/harnesstest"
 	"golang.org/x/oauth2"
 )
 

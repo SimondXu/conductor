@@ -18,7 +18,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/google/ax/internal/harness"
+	"github.com/simondxu/conductor/internal/harness"
 )
 
 type dummyHarness struct{}

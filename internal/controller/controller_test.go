@@ -20,11 +20,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/google/ax/internal/controller/eventlog"
-	"github.com/google/ax/internal/controller/eventlog/eventlogtest"
-	"github.com/google/ax/internal/harness"
-	"github.com/google/ax/internal/harness/harnesstest"
-	"github.com/google/ax/proto"
+	"github.com/simondxu/conductor/internal/controller/eventlog"
+	"github.com/simondxu/conductor/internal/controller/eventlog/eventlogtest"
+	"github.com/simondxu/conductor/internal/harness"
+	"github.com/simondxu/conductor/internal/harness/harnesstest"
+	"github.com/simondxu/conductor/proto"
 )
 
 type fakeHarness struct{}

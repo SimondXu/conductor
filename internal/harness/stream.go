@@ -19,7 +19,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/google/ax/proto"
+	"github.com/simondxu/conductor/proto"
 )
 
 // DrainStream reads from the harness gRPC stream until io.EOF, dispatching messages

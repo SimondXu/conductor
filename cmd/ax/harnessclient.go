@@ -25,7 +25,7 @@ import (
 	"log"
 	"strings"
 
-	"github.com/google/ax/proto"
+	"github.com/simondxu/conductor/proto"
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 	"google.golang.org/grpc"

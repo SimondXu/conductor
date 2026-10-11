@@ -31,7 +31,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/google/ax/internal/config"
+	"github.com/simondxu/conductor/internal/config"
 )
 
 // Config holds the configuration parameters for the sidecar lifecycle.

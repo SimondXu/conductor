@@ -20,7 +20,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/google/ax/internal/config"
+	"github.com/simondxu/conductor/internal/config"
 )
 
 func TestNewControllerFromConfig_BuiltinSubstrate(t *testing.T) {

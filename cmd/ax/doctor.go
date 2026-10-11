@@ -29,7 +29,7 @@ import (
 	"time"
 
 	"charm.land/lipgloss/v2"
-	"github.com/google/ax/internal/config"
+	"github.com/simondxu/conductor/internal/config"
 	"github.com/spf13/cobra"
 )
 

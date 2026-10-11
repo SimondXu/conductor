@@ -24,7 +24,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/google/ax/proto"
+	"github.com/simondxu/conductor/proto"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"

@@ -18,7 +18,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/google/ax/internal/config"
+	"github.com/simondxu/conductor/internal/config"
 )
 
 func TestSelectionFromConfig(t *testing.T) {

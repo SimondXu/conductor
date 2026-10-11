@@ -19,16 +19,16 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/google/ax/internal/config"
-	"github.com/google/ax/internal/controller"
-	"github.com/google/ax/internal/controller/eventlog"
-	"github.com/google/ax/internal/harness"
-	"github.com/google/ax/internal/harness/antigravity"
-	"github.com/google/ax/internal/harness/antigravityinteractions"
-	"github.com/google/ax/internal/harness/substrate"
-	"github.com/google/ax/internal/skills"
-	"github.com/google/ax/internal/skills/geminienterprise"
-	"github.com/google/ax/internal/skills/local"
+	"github.com/simondxu/conductor/internal/config"
+	"github.com/simondxu/conductor/internal/controller"
+	"github.com/simondxu/conductor/internal/controller/eventlog"
+	"github.com/simondxu/conductor/internal/harness"
+	"github.com/simondxu/conductor/internal/harness/antigravity"
+	"github.com/simondxu/conductor/internal/harness/antigravityinteractions"
+	"github.com/simondxu/conductor/internal/harness/substrate"
+	"github.com/simondxu/conductor/internal/skills"
+	"github.com/simondxu/conductor/internal/skills/geminienterprise"
+	"github.com/simondxu/conductor/internal/skills/local"
 )
 
 // Controller is the active controller type for this build.

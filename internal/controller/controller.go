@@ -21,8 +21,8 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/google/ax/internal/controller/eventlog"
-	"github.com/google/ax/proto"
+	"github.com/simondxu/conductor/internal/controller/eventlog"
+	"github.com/simondxu/conductor/proto"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/types/known/structpb"
 )

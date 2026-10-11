@@ -22,7 +22,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/google/ax/cmd/ax/internal"
+	"github.com/simondxu/conductor/cmd/ax/internal"
 )
 
 // runConfigMenu shows the /config menu and returns the (possibly updated) config.

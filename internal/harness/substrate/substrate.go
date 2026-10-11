@@ -33,9 +33,9 @@ import (
 	"google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/status"
 
-	"github.com/google/ax/internal/harness"
-	"github.com/google/ax/internal/ate"
-	"github.com/google/ax/proto"
+	"github.com/simondxu/conductor/internal/harness"
+	"github.com/simondxu/conductor/internal/ate"
+	"github.com/simondxu/conductor/proto"
 	"github.com/google/uuid"
 )
 

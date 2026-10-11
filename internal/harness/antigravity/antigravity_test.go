@@ -21,8 +21,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/google/ax/internal/harness/harnesstest"
-	"github.com/google/ax/proto"
+	"github.com/simondxu/conductor/internal/harness/harnesstest"
+	"github.com/simondxu/conductor/proto"
 )
 
 var antigravityAgentConfig = []byte(`{"system_instructions":"be terse"}`)

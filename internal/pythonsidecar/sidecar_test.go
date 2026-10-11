@@ -26,7 +26,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/ax/internal/pythonsidecar"
+	"github.com/simondxu/conductor/internal/pythonsidecar"
 )
 
 func getFreePort(t *testing.T) int {

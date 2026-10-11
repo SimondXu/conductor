@@ -18,7 +18,7 @@ import (
 	"context"
 	"sync"
 
-	"github.com/google/ax/proto"
+	"github.com/simondxu/conductor/proto"
 )
 
 // MemoryEventLog is an in-memory EventLog useful for testing and short-lived

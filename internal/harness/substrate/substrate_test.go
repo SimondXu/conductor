@@ -24,8 +24,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/ax/internal/harness/harnesstest"
-	"github.com/google/ax/internal/ate"
+	"github.com/simondxu/conductor/internal/harness/harnesstest"
+	"github.com/simondxu/conductor/internal/ate"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"

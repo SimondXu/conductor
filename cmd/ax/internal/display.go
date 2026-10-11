@@ -26,7 +26,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/huh/v2"
 	"charm.land/lipgloss/v2"
-	"github.com/google/ax/proto"
+	"github.com/simondxu/conductor/proto"
 	"google.golang.org/protobuf/types/known/structpb"
 )
 

@@ -18,7 +18,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/google/ax/internal/harness"
+	"github.com/simondxu/conductor/internal/harness"
 )
 
 // Registry manages a collection of harnesses.

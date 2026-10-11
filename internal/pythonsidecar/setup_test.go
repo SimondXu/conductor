@@ -25,8 +25,8 @@ import (
 	"testing/fstest"
 	"time"
 
-	"github.com/google/ax/internal/pythonsidecar"
-	"github.com/google/ax/python"
+	"github.com/simondxu/conductor/internal/pythonsidecar"
+	"github.com/simondxu/conductor/python"
 )
 
 func TestSetup_EmbeddedFS(t *testing.T) {

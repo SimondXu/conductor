@@ -59,9 +59,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/ax/internal/config"
-	"github.com/google/ax/internal/harness"
-	"github.com/google/ax/proto"
+	"github.com/simondxu/conductor/internal/config"
+	"github.com/simondxu/conductor/internal/harness"
+	"github.com/simondxu/conductor/proto"
 	"github.com/google/uuid"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
@@ -76,7 +76,7 @@ const (
 	cloudPlatformScope = "https://www.googleapis.com/auth/cloud-platform"
 
 	// Cloud project and location are read from these standard environment
-	// variables (see https://github.com/google/ax#authentication).
+	// variables (see https://github.com/simondxu/conductor#authentication).
 	envCloudProject  = "GOOGLE_CLOUD_PROJECT"
 	envCloudLocation = "GOOGLE_CLOUD_LOCATION"
 	// defaultLocation is used when GOOGLE_CLOUD_LOCATION is unset.

@@ -20,7 +20,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/google/ax/proto"
+	"github.com/simondxu/conductor/proto"
 )
 
 // testEventLog runs the EventLog contract against a backend. newLog returns a
