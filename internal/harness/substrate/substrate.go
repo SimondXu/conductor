@@ -19,7 +19,6 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"sync"
 	"time"
@@ -34,6 +33,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/simondxu/conductor/internal/harness"
+	"github.com/simondxu/conductor/internal/harness/remote"
 	"github.com/simondxu/conductor/internal/ate"
 	"github.com/simondxu/conductor/proto"
 	"github.com/google/uuid"
@@ -200,36 +200,7 @@ func (e *substrateExecution) Run(ctx context.Context, handler harness.Handler) e
 	e.pending = nil
 	e.mu.Unlock()
 
-	stream, err := e.client.Connect(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to open harness service stream: %w", err)
-	}
-
-	// Send a HarnessRequest to initiate the turn.
-	start := &proto.HarnessRequest{
-		ConversationId: e.conversationID,
-		AgentId:        e.harness.harnessID,
-		Type: &proto.HarnessRequest_Start{
-			Start: &proto.HarnessStart{
-				AgentConfig: e.config,
-				Steps:       inputs,
-			},
-		},
-	}
-	// A server that fails before reading the start frame makes Send/CloseSend
-	// report io.EOF; the real status is surfaced by DrainStream's Recv below, so
-	// only treat non-EOF errors as send failures.
-	if err := stream.Send(start); err != nil && err != io.EOF {
-		return fmt.Errorf("failed to send harness start: %w", err)
-	}
-
-	// Close send direction to trigger server processing.
-	if err := stream.CloseSend(); err != nil && err != io.EOF {
-		return fmt.Errorf("failed to close stream send direction: %w", err)
-	}
-
-	// Drain HarnessResponse frames until the terminal HarnessEnd.
-	return harness.DrainStream(ctx, stream, e.execID, handler)
+	return remote.Turn(ctx, e.client, e.conversationID, e.harness.harnessID, e.config, inputs, e.execID, handler)
 }
 
 func (e *substrateExecution) Close(ctx context.Context) error {

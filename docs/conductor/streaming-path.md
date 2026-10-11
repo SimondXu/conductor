@@ -1,8 +1,11 @@
 # Conductor — Streaming Path Walkthrough (M0)
 
 > Read-only map of the upstream streaming path at the pin (`b777313`, module
-> renamed in `feffa7e`). Every claim carries a `file:line` from the current tree.
-> This file describes what the code **does today**; target design lives in
+> renamed in `feffa7e`). Every `file:line` refers to commit `7e0e10c`
+> (`git show 7e0e10c:<path>`); later commits shift them. §4 has since been
+> done: `stream.go`'s `DrainStream` and the duplicated turn body now live in
+> `internal/harness/remote` (`remote.Turn`).
+> This file describes what the code **does at that commit**; target design lives in
 > `ARCHITECTURE.md`, invariants in `correctness.md`. §6 lists the edit points
 > for later milestones.
 

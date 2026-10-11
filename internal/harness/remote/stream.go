@@ -12,19 +12,54 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package harness
+// Package remote is the generic client for the gRPC HarnessService.
+package remote
 
 import (
 	"context"
 	"fmt"
 	"io"
 
+	"github.com/simondxu/conductor/internal/harness"
 	"github.com/simondxu/conductor/proto"
 )
 
-// DrainStream reads from the harness gRPC stream until io.EOF, dispatching messages
+// Turn drives one execution turn over HarnessService.Connect: it sends a single
+// HarnessRequest{start} carrying config and inputs, half-closes the stream, and
+// dispatches the responses to handler until the terminal HarnessEnd.
+func Turn(ctx context.Context, client proto.HarnessServiceClient, conversationID, agentID string, config []byte, inputs []*proto.Step, execID string, handler harness.Handler) error {
+	stream, err := client.Connect(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to open harness service stream: %w", err)
+	}
+
+	start := &proto.HarnessRequest{
+		ConversationId: conversationID,
+		AgentId:        agentID,
+		Type: &proto.HarnessRequest_Start{
+			Start: &proto.HarnessStart{
+				AgentConfig: config,
+				Steps:       inputs,
+			},
+		},
+	}
+	// A server that fails before reading the start frame makes Send/CloseSend
+	// report io.EOF; the real status is surfaced by drainStream's Recv below, so
+	// only treat non-EOF errors as send failures.
+	if err := stream.Send(start); err != nil && err != io.EOF {
+		return fmt.Errorf("failed to send harness start: %w", err)
+	}
+	// Close send direction to trigger server processing.
+	if err := stream.CloseSend(); err != nil && err != io.EOF {
+		return fmt.Errorf("failed to close stream send direction: %w", err)
+	}
+
+	return drainStream(ctx, stream, execID, handler)
+}
+
+// drainStream reads from the harness gRPC stream until io.EOF, dispatching messages
 // to the handler, and returns the final execution status.
-func DrainStream(ctx context.Context, stream proto.HarnessService_ConnectClient, execID string, handler Handler) error {
+func drainStream(ctx context.Context, stream proto.HarnessService_ConnectClient, execID string, handler harness.Handler) error {
 	var endState proto.State
 	var endErr error
 	hasEnd := false
