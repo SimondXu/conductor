@@ -114,6 +114,30 @@ func TestReplayedTurnIsIdentical(t *testing.T) {
 	}
 }
 
+func TestCallIDsDifferAcrossConversations(t *testing.T) {
+	h := New(&MemoryEffects{})
+	ids := map[string]bool{}
+	for _, conv := range []string{"a", "b"} {
+		exec, err := h.Start(context.Background(), conv, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = exec.Queue(context.Background(), harnesstest.UserStep("go"))
+		mh := &harnesstest.MockHandler{}
+		if err := exec.Run(context.Background(), mh); err != nil {
+			t.Fatal(err)
+		}
+		for _, s := range mh.Collected() {
+			if c := s.GetToolCall(); c != nil {
+				if ids[c.GetId()] {
+					t.Fatalf("call id %q reused across conversations", c.GetId())
+				}
+				ids[c.GetId()] = true
+			}
+		}
+	}
+}
+
 func TestScriptRestartsOnNewUserInput(t *testing.T) {
 	cfg := `{"turns":[{"content":"one"}]}`
 	h := New(&MemoryEffects{})

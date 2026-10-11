@@ -203,8 +203,9 @@ func (e *execution) modelTurn(ctx context.Context, handler harness.Handler, hist
 			return fmt.Errorf("fake: tool %q args: %w", c.Name, err)
 		}
 		steps = append(steps, &proto.Step{Type: &proto.Step_ToolCall{ToolCall: &proto.ToolCallStep{
-			// Derived from the history, so a replayed turn yields the same id.
-			Id: fmt.Sprintf("fake-%d-%d", len(history), i),
+			// Derived from the conversation and history, so a replayed turn
+			// yields the same id and no two conversations share one.
+			Id: fmt.Sprintf("fake-%s-%d-%d", e.conversationID, len(history), i),
 			Type: &proto.ToolCallStep_FunctionCall{FunctionCall: &proto.FunctionCallStep{
 				Name: c.Name, Arguments: args,
 			}},

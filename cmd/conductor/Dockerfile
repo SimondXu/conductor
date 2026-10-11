@@ -94,6 +94,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /out/conductor /conductor-app/conductor
+ENV PATH=/conductor-app:$PATH
 
 EXPOSE 80
 
