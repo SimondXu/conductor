@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/simondxu/conductor/internal/controller/eventlog"
 	"github.com/simondxu/conductor/internal/harness"
@@ -65,7 +66,19 @@ func New(ctx context.Context, cfg Config) (*Controller, error) {
 // Exec executes a new agentic loop execution or resumes an existing one.
 // If id is empty, a UUID will be generated.
 // If the execution already exists, it will be resumed with optional new inputs.
-func (d *Controller) Exec(ctx context.Context, req *proto.CreateInteractionEvent, handler ExecHandler) error {
+func (d *Controller) Exec(ctx context.Context, req *proto.CreateInteractionEvent, handler ExecHandler) (err error) {
+	runsActive.Inc()
+	start := time.Now()
+	defer func() {
+		runsActive.Dec()
+		outcome := runOutcome(err)
+		runsTotal.WithLabelValues(outcome).Inc()
+		runDuration.WithLabelValues(outcome).Observe(time.Since(start).Seconds())
+	}()
+	return d.exec(ctx, req, handler)
+}
+
+func (d *Controller) exec(ctx context.Context, req *proto.CreateInteractionEvent, handler ExecHandler) error {
 	if req.ConversationId == "" {
 		return fmt.Errorf("conversation_id is required")
 	}
