@@ -21,6 +21,8 @@ import (
 	"testing"
 
 	"github.com/simondxu/conductor/internal/config"
+	"github.com/simondxu/conductor/internal/harness/harnesstest"
+	"github.com/simondxu/conductor/proto"
 )
 
 func TestNewControllerFromConfig_BuiltinSubstrate(t *testing.T) {
@@ -126,4 +128,40 @@ func TestNewControllerFromConfig_CustomHarnessInSubstrateMode(t *testing.T) {
 		t.Fatal("expected non-nil controller")
 	}
 	c.Close()
+}
+
+// With antigravity disabled, a controller builds without Python, defaults to
+// the fake harness, and runs its script to completion on SQLite.
+func TestNewControllerFromConfig_FakeWithoutPython(t *testing.T) {
+	t.Setenv("CONDUCTOR_SUBSTRATE", "")
+	t.Setenv("CONDUCTOR_DURABLE_DIR", t.TempDir())
+
+	cfg := &config.Config{
+		EventLog: config.EventLogConfig{
+			SQLiteConfig: config.SQLiteConfig{Filename: filepath.Join(t.TempDir(), "log.sqlite")},
+		},
+		Registry: config.RegistryConfig{
+			Antigravity: config.AntigravityHarnessConfig{Disabled: true},
+		},
+	}
+	c, err := NewControllerFromConfig(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("NewControllerFromConfig: %v", err)
+	}
+	defer c.Close()
+
+	var outputs int
+	err = c.Exec(context.Background(), &proto.CreateInteractionEvent{
+		ConversationId: "fake-local",
+		Inputs:         []*proto.Step{harnesstest.UserStep("go")},
+	}, func(r *proto.CreateInteractionResponse) error {
+		outputs += len(r.Outputs)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	if outputs != 6 {
+		t.Errorf("outputs = %d, want 6", outputs)
+	}
 }

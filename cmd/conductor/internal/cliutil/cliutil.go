@@ -25,6 +25,8 @@ import (
 	"github.com/simondxu/conductor/internal/harness"
 	"github.com/simondxu/conductor/internal/harness/antigravity"
 	"github.com/simondxu/conductor/internal/harness/antigravityinteractions"
+	"github.com/simondxu/conductor/internal/harness/fake"
+	"github.com/simondxu/conductor/internal/harness/remote"
 	"github.com/simondxu/conductor/internal/harness/substrate"
 	"github.com/simondxu/conductor/internal/skills"
 	"github.com/simondxu/conductor/internal/skills/geminienterprise"
@@ -94,8 +96,12 @@ func NewControllerFromConfig(ctx context.Context, cfg *Config) (*controller.Cont
 	}
 
 	// Built-in Antigravity harness.
+	antigravityDisabled := cfg.Antigravity.Disabled || cfg.Registry.Antigravity.Disabled
 	var antigravityHarness harness.Harness
-	if !substrateMode {
+	switch {
+	case antigravityDisabled:
+		// Not registered.
+	case !substrateMode:
 		address := cfg.Antigravity.Endpoint
 		if address == "" {
 			address = cfg.Registry.Antigravity.Endpoint
@@ -114,14 +120,16 @@ func NewControllerFromConfig(ctx context.Context, cfg *Config) (*controller.Cont
 		if err != nil {
 			return nil, fmt.Errorf("antigravity harness: %w", err)
 		}
-	} else {
+	default:
 		antigravityHarness, err = substrate.New(config.AntigravityHarnessID, "", "", config.AntigravityHarnessTemplate, 80)
 		if err != nil {
 			return nil, fmt.Errorf("antigravity harness: %w", err)
 		}
 	}
-	if err := reg.RegisterHarness(config.AntigravityHarnessID, antigravityHarness); err != nil {
-		return nil, fmt.Errorf("register antigravity harness: %w", err)
+	if antigravityHarness != nil {
+		if err := reg.RegisterHarness(config.AntigravityHarnessID, antigravityHarness); err != nil {
+			return nil, fmt.Errorf("register antigravity harness: %w", err)
+		}
 	}
 	if cfg.Antigravity.Default || cfg.Registry.Antigravity.Default {
 		defaultHarnessID = config.AntigravityHarnessID
@@ -172,6 +180,18 @@ func NewControllerFromConfig(ctx context.Context, cfg *Config) (*controller.Cont
 		defaultHarnessID = config.AntigravityInteractionsHarnessID
 	}
 
+	// Built-in fake harness: deterministic, zero-key, recovery:full.
+	fakeHarness, err := newFakeHarness(ctx, cfg.Registry.Fake)
+	if err != nil {
+		return nil, fmt.Errorf("fake harness: %w", err)
+	}
+	if err := reg.Register(config.FakeHarnessID, fakeHarness, controller.RecoveryFull); err != nil {
+		return nil, fmt.Errorf("register fake harness: %w", err)
+	}
+	if cfg.Registry.Fake.Default {
+		defaultHarnessID = config.FakeHarnessID
+	}
+
 	for _, sc := range cfg.Registry.Substrate {
 		h, err := sc.NewHarness("")
 		if err != nil {
@@ -185,9 +205,13 @@ func NewControllerFromConfig(ctx context.Context, cfg *Config) (*controller.Cont
 		}
 	}
 
-	// Antigravity is the default harness by default if no other harness set Default: true.
+	// Antigravity is the default harness by default if no other harness set
+	// Default: true, or fake when antigravity is disabled.
 	if defaultHarnessID == "" {
 		defaultHarnessID = config.AntigravityHarnessID
+		if antigravityDisabled {
+			defaultHarnessID = config.FakeHarnessID
+		}
 	}
 
 	// Set the default harness.
@@ -208,4 +232,20 @@ func NewControllerFromConfig(ctx context.Context, cfg *Config) (*controller.Cont
 			return eventlog.OpenSQLiteEventLog(cfg.EventLog.SQLiteConfig.Filename)
 		},
 	})
+}
+
+// newFakeHarness builds the fake harness: a client of a remote
+// `conductor harness fake` when Endpoint is set, in-process otherwise.
+func newFakeHarness(ctx context.Context, c config.FakeHarnessConfig) (harness.Harness, error) {
+	if c.Endpoint != "" {
+		return remote.NewHarness(c.Endpoint, config.FakeHarnessID)
+	}
+	if c.EffectsDSN == "" {
+		return fake.New(&fake.MemoryEffects{}), nil
+	}
+	effects, err := fake.OpenPostgresEffects(ctx, os.ExpandEnv(c.EffectsDSN))
+	if err != nil {
+		return nil, err
+	}
+	return fake.New(effects), nil
 }

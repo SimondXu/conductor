@@ -30,6 +30,7 @@ import (
 	"github.com/simondxu/conductor/cmd/conductor/internal/cliutil"
 	"github.com/simondxu/conductor/proto"
 	"github.com/google/uuid"
+	"github.com/mattn/go-isatty"
 	"github.com/spf13/cobra"
 )
 
@@ -283,6 +284,11 @@ func execLoop(ctx context.Context, id string, harnessID string, agentConfig []by
 					break
 				}
 			}
+		}
+
+		// Without a terminal there is no one to prompt: one request, then exit.
+		if !isatty.IsTerminal(os.Stdin.Fd()) {
+			return nil
 		}
 
 		// Per-request config: clear the config after each turn.

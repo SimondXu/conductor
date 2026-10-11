@@ -35,6 +35,7 @@ const (
 	// Harness IDs reserved for AX's built-in harnesses.
 	AntigravityHarnessID             = "antigravity"
 	AntigravityInteractionsHarnessID = "antigravity-interactions"
+	FakeHarnessID                    = "fake"
 	// AntigravityHarnessTemplate is the substrate ActorTemplate that runs the
 	// Antigravity harness.
 	AntigravityHarnessTemplate = "conductor-harness-antigravity-template"
@@ -99,12 +100,30 @@ type RegistryConfig struct {
 	Antigravity             AntigravityHarnessConfig             `yaml:"antigravity,omitempty"`
 	AntigravityInteractions AntigravityInteractionsHarnessConfig `yaml:"antigravity-interactions,omitempty"`
 	Substrate               []SubstrateHarnessConfig             `yaml:"substrate,omitempty"`
+	Fake                    FakeHarnessConfig                    `yaml:"fake,omitempty"`
+}
+
+// FakeHarnessConfig registers the deterministic fake harness. It is always
+// registered; these fields only choose where it runs and where its tool
+// effects are recorded.
+type FakeHarnessConfig struct {
+	Default bool `yaml:"default,omitempty"`
+	// Endpoint is the HarnessService address of a `conductor harness fake`
+	// process. Empty runs the harness in-process.
+	Endpoint string `yaml:"endpoint,omitempty"`
+	// EffectsDSN is a Postgres DSN for the fake_effects table, expanded with
+	// os.ExpandEnv. Empty records effects in memory. In-process only; a remote
+	// harness takes its own --effects-dsn.
+	EffectsDSN string `yaml:"effects_dsn,omitempty"`
 }
 
 // AntigravityHarnessConfig registers the built-in Antigravity harness.
 type AntigravityHarnessConfig struct {
 	Default  bool   `yaml:"default,omitempty"`
 	Endpoint string `yaml:"endpoint,omitempty"` // HarnessService address
+	// Disabled skips registering the harness, so a controller without Python
+	// does not try to install and fork the sidecar.
+	Disabled bool `yaml:"disabled,omitempty"`
 }
 
 // AntigravityInteractionsHarnessConfig registers the built-in Antigravity
@@ -325,9 +344,15 @@ func (c *Config) Validate() error {
 
 	var defaultCount int
 	if c.Antigravity.Default || c.Registry.Antigravity.Default {
+		if c.Antigravity.Disabled || c.Registry.Antigravity.Disabled {
+			return fmt.Errorf("the antigravity harness is both default and disabled")
+		}
 		defaultCount++
 	}
 	if c.Registry.AntigravityInteractions.Default {
+		defaultCount++
+	}
+	if c.Registry.Fake.Default {
 		defaultCount++
 	}
 
@@ -335,7 +360,7 @@ func (c *Config) Validate() error {
 		if sc.ID == "" {
 			return fmt.Errorf("substrate harness id is required")
 		}
-		if sc.ID == AntigravityHarnessID || sc.ID == AntigravityInteractionsHarnessID {
+		if sc.ID == AntigravityHarnessID || sc.ID == AntigravityInteractionsHarnessID || sc.ID == FakeHarnessID {
 			return fmt.Errorf("substrate harness id %q is reserved for built-in harnesses", sc.ID)
 		}
 		if sc.Namespace == "" {

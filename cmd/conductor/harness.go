@@ -12,9 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package main: the `ax harness` command. It runs one harness in-process,
-// selected by the optional [harness-id] argument: "antigravity" (default)
-// or "antigravity-interactions"
+// Package main: the `conductor harness` command. It runs one harness in-process,
+// selected by the optional [harness-id] argument: "antigravity" (default),
+// "antigravity-interactions" or "fake"
 package main
 
 import (
@@ -33,16 +33,21 @@ import (
 	"github.com/simondxu/conductor/internal/config"
 	"github.com/simondxu/conductor/internal/harness/antigravity"
 	"github.com/simondxu/conductor/internal/harness/antigravityinteractions"
+	"github.com/simondxu/conductor/internal/harness/fake"
+	"github.com/simondxu/conductor/internal/harness/remote"
 	"github.com/simondxu/conductor/internal/pythonsidecar"
+	"github.com/simondxu/conductor/proto"
 	"github.com/spf13/cobra"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/health"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 )
 
 var (
-	harnessPort int
-	harnessHost string
+	harnessPort       int
+	harnessHost       string
+	harnessEffectsDSN string
 )
 
 // harnessReadyzPort is the port for the HTTP /readyz readiness endpoint.
@@ -59,6 +64,7 @@ var harnessCmd = &cobra.Command{
 func init() {
 	harnessCmd.Flags().IntVar(&harnessPort, "port", 50053, "Port for the HarnessService to listen on")
 	harnessCmd.Flags().StringVar(&harnessHost, "host", "127.0.0.1", "Host interface for the HarnessService to bind")
+	harnessCmd.Flags().StringVar(&harnessEffectsDSN, "effects-dsn", "", "fake only: Postgres DSN for the fake_effects table (default: in memory)")
 	rootCmd.AddCommand(harnessCmd)
 }
 
@@ -92,9 +98,11 @@ func runHarness(cmd *cobra.Command, args []string) error {
 		return runAntigravityInteractionsHarness(cmd.Context())
 	case config.AntigravityHarnessID:
 		return runAntigravityHarness(cmd)
+	case config.FakeHarnessID:
+		return runFakeHarness(cmd.Context())
 	default:
-		return fmt.Errorf("unknown harness %q (want %q or %q)",
-			harnessID, config.AntigravityHarnessID, config.AntigravityInteractionsHarnessID)
+		return fmt.Errorf("unknown harness %q (want %q, %q or %q)",
+			harnessID, config.AntigravityHarnessID, config.AntigravityInteractionsHarnessID, config.FakeHarnessID)
 	}
 }
 
@@ -191,6 +199,39 @@ func runAntigravityInteractionsHarness(ctx context.Context) error {
 		SystemInstruction: antigravityinteractions.JoinSystemInstruction(hc.SystemInstruction, antigravityinteractions.WorkspaceSystemInstruction(workDir)),
 	}
 	return antigravityinteractions.Serve(ctx, cfg, harnessHost, harnessPort, harnessReadyzPort)
+}
+
+// runFakeHarness serves the fake harness (HarnessService + gRPC health) until
+// SIGINT/SIGTERM.
+func runFakeHarness(ctx context.Context) error {
+	var effects fake.EffectSink = &fake.MemoryEffects{}
+	if harnessEffectsDSN != "" {
+		pg, err := fake.OpenPostgresEffects(ctx, harnessEffectsDSN)
+		if err != nil {
+			return err
+		}
+		defer pg.Close()
+		effects = pg
+	}
+
+	lis, err := net.Listen("tcp", net.JoinHostPort(harnessHost, strconv.Itoa(harnessPort)))
+	if err != nil {
+		return err
+	}
+	srv := grpc.NewServer()
+	proto.RegisterHarnessServiceServer(srv, remote.NewServer(fake.New(effects)))
+	hs := health.NewServer()
+	hs.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)
+	healthpb.RegisterHealthServer(srv, hs)
+
+	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	go func() {
+		<-ctx.Done()
+		srv.GracefulStop()
+	}()
+	log.Printf("fake harness serving on %s", lis.Addr())
+	return srv.Serve(lis)
 }
 
 // serveReadyz serves the HTTP /readyz endpoint on readyzPort that substrate's
