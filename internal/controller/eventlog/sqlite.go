@@ -50,6 +50,23 @@ func OpenSQLiteEventLog(path string) (EventLog, error) {
 		db.Close()
 		return nil, fmt.Errorf("sqlite_eventlog: create conversation_log table: %w", err)
 	}
+	// SQLite is not migrated: add columns that later schema versions
+	// introduced, so files created by older binaries keep working.
+	var hasEventID int
+	if err := db.QueryRow("SELECT count(*) FROM pragma_table_info('conversation_log') WHERE name = 'event_id'").Scan(&hasEventID); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("sqlite_eventlog: inspect schema: %w", err)
+	}
+	if hasEventID == 0 {
+		if _, err := db.Exec("ALTER TABLE conversation_log ADD COLUMN event_id TEXT"); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("sqlite_eventlog: add event_id: %w", err)
+		}
+	}
+	if _, err := db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS conversation_log_event_id ON conversation_log (event_id) WHERE event_id IS NOT NULL"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("sqlite_eventlog: create event_id index: %w", err)
+	}
 
 
 	return &sqlEventLog{db: db}, nil

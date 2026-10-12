@@ -36,6 +36,9 @@ func (m *MemoryEventLog) Append(_ context.Context, event *proto.StepEvent) (int6
 	for _, ev := range m.AllEvents {
 		if ev.ConversationId == event.ConversationId {
 			maxStep++
+			if event.EventId != "" && ev.EventId == event.EventId {
+				return maxStep, nil // idempotent retry (I10)
+			}
 		}
 	}
 	step := maxStep + 1

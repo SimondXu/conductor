@@ -34,6 +34,9 @@ message StepEvent {
   google.protobuf.Struct agent_config = 4;
   repeated Step steps = 5;
   State state = 6;
+  // Client-generated id (UUID) that makes appending this event idempotent: a
+  // retried append with the same event_id returns the existing step.
+  string event_id = 7;
 }
 
 message HarnessStart {

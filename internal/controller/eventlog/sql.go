@@ -17,6 +17,7 @@ package eventlog
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 
 	"github.com/simondxu/conductor/proto"
@@ -32,7 +33,8 @@ type sqlEventLog struct {
 	db *sql.DB
 }
 
-// Append serializes the event to JSON and inserts it into the database.
+// Append serializes the event to JSON and inserts it into the database. It is
+// idempotent on event.EventId when that is set.
 func (l *sqlEventLog) Append(ctx context.Context, event *proto.StepEvent) (step int64, err error) {
 	ctx, endSpan := l.startSpan(ctx, "Append", event.ConversationId)
 	defer func() { endSpan(err) }()
@@ -52,9 +54,21 @@ func (l *sqlEventLog) Append(ctx context.Context, event *proto.StepEvent) (step 
 		return 0, fmt.Errorf("eventlog: marshal event: %w", err)
 	}
 
-	if _, err := tx.ExecContext(ctx,
-		"INSERT INTO conversation_log (conversation_id, step, payload) VALUES ($1, $2, $3)",
-		event.ConversationId, step, string(payload)); err != nil {
+	// I10: a retried append with the same event_id inserts nothing and returns
+	// the step the first attempt got.
+	var eventID any
+	if event.EventId != "" {
+		eventID = event.EventId
+	}
+	err = tx.QueryRowContext(ctx, `
+		INSERT INTO conversation_log (conversation_id, step, payload, event_id) VALUES ($1, $2, $3, $4)
+		ON CONFLICT (event_id) WHERE event_id IS NOT NULL DO NOTHING
+		RETURNING step`,
+		event.ConversationId, step, string(payload), eventID).Scan(&step)
+	if errors.Is(err, sql.ErrNoRows) {
+		err = tx.QueryRowContext(ctx, "SELECT step FROM conversation_log WHERE event_id = $1", eventID).Scan(&step)
+	}
+	if err != nil {
 		return 0, fmt.Errorf("eventlog: insert conversation: %w", err)
 	}
 

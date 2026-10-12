@@ -16,6 +16,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -734,5 +735,112 @@ func TestOwnedLoop_ResumesAfterFailedModelTurn(t *testing.T) {
 	}
 	if state != proto.State_STATE_COMPLETED || len(steps) != 2 {
 		t.Fatalf("state = %v, steps = %d; want COMPLETED with user + assistant", state, len(steps))
+	}
+}
+
+// flakyLog fails Append on chosen calls (1-based) and delegates otherwise.
+type flakyLog struct {
+	eventlogtest.MemoryEventLog
+	calls int
+	fail  func(call int) bool
+}
+
+func (f *flakyLog) Append(ctx context.Context, ev *proto.StepEvent) (int64, error) {
+	f.calls++
+	if f.fail(f.calls) {
+		return 0, errors.New("injected append failure")
+	}
+	return f.MemoryEventLog.Append(ctx, ev)
+}
+
+func newFlakyController(t *testing.T, log eventlog.EventLog, h harness.Harness) *Controller {
+	t.Helper()
+	reg := NewRegistry()
+	if err := reg.RegisterHarness("h", h); err != nil {
+		t.Fatal(err)
+	}
+	c, err := New(context.Background(), Config{
+		Registry:        reg,
+		EventLogBuilder: func() (eventlog.EventLog, error) { return log, nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { c.Close() })
+	return c
+}
+
+// I9: a step whose append failed is never delivered.
+func TestAppendFailureIsNotDeliveredToClient(t *testing.T) {
+	// Call 1 logs the inputs; every later append fails, retries included.
+	log := &flakyLog{fail: func(call int) bool { return call > 1 }}
+	c := newFlakyController(t, log, &fakeHarness{})
+
+	var delivered int
+	err := c.Exec(context.Background(), &proto.CreateInteractionEvent{
+		ConversationId: "i9", AgentId: "h", Inputs: []*proto.Step{harnesstest.UserStep("hi")},
+	}, func(r *proto.CreateInteractionResponse) error {
+		delivered += len(r.Outputs)
+		return nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "injected append failure") {
+		t.Fatalf("err = %v, want the append failure", err)
+	}
+	if delivered != 0 {
+		t.Errorf("delivered %d steps that were never persisted", delivered)
+	}
+}
+
+// A transient append failure is retried with the same event_id, so the step
+// is persisted and delivered exactly once.
+func TestTransientAppendFailureIsRetried(t *testing.T) {
+	log := &flakyLog{fail: func(call int) bool { return call == 2 }}
+	c := newFlakyController(t, log, &fakeHarness{})
+
+	var delivered []*proto.Step
+	if err := c.Exec(context.Background(), &proto.CreateInteractionEvent{
+		ConversationId: "retry", AgentId: "h", Inputs: []*proto.Step{harnesstest.UserStep("hi")},
+	}, func(r *proto.CreateInteractionResponse) error {
+		delivered = append(delivered, r.Outputs...)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	events, _ := log.Events(context.Background(), "retry")
+	if len(delivered) != 1 || len(events) != 3 || delivered[0].Index != 2 {
+		t.Fatalf("delivered %d (index %d), events %d; want 1 at index 2, 3 events", len(delivered), delivered[0].GetIndex(), len(events))
+	}
+}
+
+// A failed turn records FAILED, so the next request with new inputs runs
+// instead of first retrying the dead turn (streaming-path.md §5.1).
+func TestFailedTurnDoesNotWedgeConversation(t *testing.T) {
+	log := &eventlogtest.MemoryEventLog{}
+	failing := true
+	h := &testHarness{startFunc: func(ctx context.Context, conversationID string) (harness.Execution, error) {
+		return &testExecution{id: "e", runFunc: func(ctx context.Context, execID string, handler harness.Handler) error {
+			if failing {
+				return errors.New("harness down")
+			}
+			return handler.OnComplete(ctx, execID)
+		}}, nil
+	}}
+	c := newFlakyController(t, log, h)
+	req := func() *proto.CreateInteractionEvent {
+		return &proto.CreateInteractionEvent{ConversationId: "wedge", AgentId: "h", Inputs: []*proto.Step{harnesstest.UserStep("hi")}}
+	}
+	if err := c.Exec(context.Background(), req(), nil); err == nil {
+		t.Fatal("first Exec: want error")
+	}
+	state, _, _, _ := newLogger(log, "wedge", "").ResumptionState(context.Background())
+	if state != proto.State_STATE_FAILED {
+		t.Fatalf("state after failure = %v, want FAILED", state)
+	}
+	failing = false
+	if err := c.Exec(context.Background(), req(), nil); err != nil {
+		t.Fatalf("second Exec: %v", err)
+	}
+	if h.startCalls != 2 {
+		t.Errorf("Start calls = %d, want 2 (no resume of the failed turn)", h.startCalls)
 	}
 }
