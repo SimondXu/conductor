@@ -510,6 +510,37 @@ One loop per replica: 5 s poll with jitter, bounded concurrency (4),
 client reconnect calls the same `recoverOne(convID)` as a latency optimisation,
 never a second code path.
 
+**As built [P1]: replay snapshots** (migration 0007, PLAN.md G6).
+
+- **What is stored.** `conversation_snapshots` holds one row per
+  conversation: the events `1..step` folded into a single `StepEvent` (the
+  first harness id, the last agent_config and state, every step in order),
+  as binary protobuf.
+- **How replay uses it.** `replay` reads the snapshot and then
+  `EventsSince(step)`. When that tail reaches 100 events, it saves a new
+  snapshot at the end of the tail. `conductor_replay_events_total` now
+  counts only tails.
+- **Why it needs no fencing.** The log is append-only, so the fold of its
+  first `step` events is the same whoever computes it. The upsert keeps the
+  highest step.
+- **What happens when a snapshot fails.** A snapshot is a cache: one that
+  cannot be read or saved costs a full replay, nothing worse.
+- **No compaction.** Old log rows are not deleted. I5, I7a and I7b,
+  `Attach` catch-up and `inspect` all read the full log, and it is the
+  audit record. Deleting old rows would be a retention policy, which is a
+  separate decision.
+- **The honest limit.** An owned-loop harness gets the whole history every
+  turn, so a snapshot cuts rows read and per-row JSON decoding, not history
+  size. `BenchmarkReplay` on a laptop:
+
+  | log | whole log | snapshot + 10-event tail |
+  |---|---|---|
+  | 2000 events | 7.5 ms | 3.0 ms |
+  | 200 events | 1.3 ms | 0.8 ms |
+
+  Making history itself bounded would need summarisation, which is model
+  behaviour and out of scope (PLAN.md §9).
+
 **As built [M4]** (`internal/controller/reconciler.go`):
 
 - **Sources A and B are one query**, `RecoveryCandidates`
