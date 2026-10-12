@@ -225,8 +225,10 @@ llama.cpp, LM Studio) and hosted providers that expose an OpenAI-compatible
 endpoint, without Conductor knowing anything about them.
 
 Building a provider matrix would turn the runtime into a model gateway, which is
-a different product. Anthropic has no OpenAI-compatible endpoint and gets a
-native adapter in P1; until then, point `base_url` at a proxy.
+a different product. The one exception is Anthropic, which gets a native
+harness, `anthropic` (§3.5): its thinking blocks have to go back signed and
+unchanged on every tool turn, and the chat-completions format has no field for
+them.
 
 ### 3.2 Config surface
 
@@ -317,6 +319,50 @@ Column meanings:
 - **Chaos suite** — whether `make bench` ran its failure classes against this
   endpoint rather than against `fake`. Expect most rows to say "not run": the
   benchmark's reproducible numbers come from `fake` by design (§8.1).
+
+### 3.5 The Anthropic harness [P1]
+
+`registry.anthropic` speaks the Messages API through the official Go SDK. The
+owned loop, the tools, and what a tool turn does are the same as §3.2; it is
+registered when `model` is set.
+
+| Key | Required | Meaning |
+|---|---|---|
+| `model` | yes | Model id, e.g. `claude-opus-5-5` |
+| `base_url` | no | Default `https://api.anthropic.com` |
+| `api_key_env` | no | Name of the env var holding the key. Default `ANTHROPIC_API_KEY`. The SDK's own credential and endpoint autoload (`ANTHROPIC_*` variables, `ant` profiles) is switched off; only this config is read. |
+| `max_tokens` | no | Per-response cap. Default `16000`. |
+| `effort` | no | `output_config.effort`: `low` \| `medium` \| `high` \| `xhigh` \| `max`. Unset leaves the model's default. |
+| `request_timeout`, `max_turns`, `tools[]` | no | As in §3.2. |
+| `default` | no | Make it the default harness. |
+
+What it does:
+
+- **Thinking blocks survive the loop.** `thinking` is not configured, so the
+  model's default applies. Each `thinking` block is logged as a thought step
+  with its signature and sent back unchanged, in its original position. The
+  history is rebuilt from the log on every turn, so every request's messages
+  are a byte-for-byte prefix of the next request's
+  (`TestToolLoop_HistoryIsAppendOnly`); that is what the API checks before it
+  accepts an earlier thinking block. Conductor replaces each `tool_use` id
+  with its `call_id` before the call is first sent back, so the API never sees
+  the original id and the rewrite is not a history edit.
+- **Prompt caching is on.** The request carries a top-level `cache_control`,
+  and the append-only history lets each turn read the previous turn's cache.
+- **Model requests are retried, tool requests are not.** The SDK's default
+  retries (two, on 408/409/429/5xx) stay on: a model request has no side
+  effects. `conductor_model_calls_total` counts one per Messages call,
+  retries included, and its duration covers them.
+- **Stop reasons.** `end_turn`, `tool_use` and `stop_sequence` are answers.
+  `refusal` fails the turn with its category; `max_tokens` and anything else
+  fail it rather than log a truncated answer. No `fallbacks` model is sent.
+- **Usage.** `prompt` tokens are input plus cache reads plus cache writes;
+  `completion` tokens are output.
+
+Not supported: `redacted_thinking` and server-tool blocks (the turn fails, since
+a block that cannot be logged cannot be sent back), streaming, and fallbacks.
+It has been tested only against a local fake of the Messages API; no run
+against the real API is recorded, so §3.4 has no Anthropic row.
 
 ---
 
@@ -434,7 +480,7 @@ Read-only. Three subcommands.
 
 ```
 conductor inspect conversation <id> [--from-step N] [--json]
-conconductor inspect tools <conversation-id> [--unsettled-only] [--json]
+conductor inspect tools <conversation-id> [--unsettled-only] [--json]
 conductor inspect runs [--state PENDING|COMPLETED|FAILED|CANCELED] [--limit N]
 ```
 
@@ -644,6 +690,7 @@ reports the backend it ran on.
 |---|---|---|---|
 | `fake` | Conductor | yes | deterministic, zero-key, source of all benchmark numbers |
 | `openai-compat` | Conductor | yes | any OpenAI-compatible endpoint with tool calling |
+| `anthropic` | Conductor | yes | the Anthropic Messages API (§3.5) |
 | `antigravity` | harness | no | state in a local sidecar |
 | `antigravity-interactions` | harness | no | conversation state in a remote service, keyed by an interaction id Conductor does not hold |
 | `substrate` | harness | no | requires Agent Substrate |

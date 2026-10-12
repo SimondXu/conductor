@@ -24,7 +24,9 @@ import (
 
 	"github.com/simondxu/conductor/internal/controller/toolledger"
 	"github.com/simondxu/conductor/internal/harness"
+	"github.com/simondxu/conductor/internal/harness/anthropic"
 	"github.com/simondxu/conductor/internal/harness/openaicompat"
+	"github.com/simondxu/conductor/internal/harness/ownedloop"
 	"github.com/simondxu/conductor/internal/harness/substrate"
 	"gopkg.in/yaml.v3"
 )
@@ -40,6 +42,7 @@ const (
 	AntigravityInteractionsHarnessID = "antigravity-interactions"
 	FakeHarnessID                    = "fake"
 	OpenAICompatHarnessID            = "openai-compat"
+	AnthropicHarnessID               = "anthropic"
 	// AntigravityHarnessTemplate is the substrate ActorTemplate that runs the
 	// Antigravity harness.
 	AntigravityHarnessTemplate = "conductor-harness-antigravity-template"
@@ -112,6 +115,14 @@ type RegistryConfig struct {
 	Substrate               []SubstrateHarnessConfig             `yaml:"substrate,omitempty"`
 	Fake                    FakeHarnessConfig                    `yaml:"fake,omitempty"`
 	OpenAICompat            OpenAICompatHarnessConfig            `yaml:"openai-compat,omitempty"`
+	Anthropic               AnthropicHarnessConfig               `yaml:"anthropic,omitempty"`
+}
+
+// AnthropicHarnessConfig registers the Anthropic harness (docs/conductor/PRD.md
+// §3.5). It is registered only when model is set.
+type AnthropicHarnessConfig struct {
+	Default          bool `yaml:"default,omitempty"`
+	anthropic.Config `yaml:",inline"`
 }
 
 // OpenAICompatHarnessConfig registers the OpenAI-compatible harness
@@ -412,12 +423,15 @@ func (c *Config) Validate() error {
 	if c.Registry.OpenAICompat.Default {
 		defaultCount++
 	}
+	if c.Registry.Anthropic.Default {
+		defaultCount++
+	}
 
 	for _, sc := range c.Registry.Substrate {
 		if sc.ID == "" {
 			return fmt.Errorf("substrate harness id is required")
 		}
-		if sc.ID == AntigravityHarnessID || sc.ID == AntigravityInteractionsHarnessID || sc.ID == FakeHarnessID || sc.ID == OpenAICompatHarnessID {
+		if sc.ID == AntigravityHarnessID || sc.ID == AntigravityInteractionsHarnessID || sc.ID == FakeHarnessID || sc.ID == OpenAICompatHarnessID || sc.ID == AnthropicHarnessID {
 			return fmt.Errorf("substrate harness id %q is reserved for built-in harnesses", sc.ID)
 		}
 		if sc.Namespace == "" {
@@ -459,6 +473,9 @@ func (c *Config) Validate() error {
 	if err := c.Registry.OpenAICompat.validate(); err != nil {
 		return err
 	}
+	if err := c.Registry.Anthropic.validate(); err != nil {
+		return err
+	}
 
 	if defaultCount > 1 {
 		return fmt.Errorf("multiple harnesses marked as default")
@@ -489,20 +506,43 @@ func (oc OpenAICompatHarnessConfig) validate() error {
 	if oc.RequestTimeout < 0 || oc.MaxTurns < 0 {
 		return fmt.Errorf("registry.openai-compat: request_timeout and max_turns must not be negative")
 	}
+	return validateTools("registry.openai-compat", oc.Tools)
+}
+
+func (ac AnthropicHarnessConfig) validate() error {
+	if ac.Model == "" {
+		if ac.Default || ac.BaseURL != "" || len(ac.Tools) > 0 {
+			return fmt.Errorf("registry.anthropic: model is required")
+		}
+		return nil
+	}
+	switch ac.Effort {
+	case "", "low", "medium", "high", "xhigh", "max":
+	default:
+		return fmt.Errorf("registry.anthropic: effort %q is not low, medium, high, xhigh or max", ac.Effort)
+	}
+	if ac.RequestTimeout < 0 || ac.MaxTurns < 0 || ac.MaxTokens < 0 {
+		return fmt.Errorf("registry.anthropic: request_timeout, max_turns and max_tokens must not be negative")
+	}
+	return validateTools("registry.anthropic", ac.Tools)
+}
+
+// validateTools checks the tools of an owned-loop harness's config section.
+func validateTools(section string, tools []ownedloop.Tool) error {
 	seen := map[string]bool{}
-	for _, t := range oc.Tools {
+	for _, t := range tools {
 		if t.Name == "" {
-			return fmt.Errorf("registry.openai-compat.tools: name is required")
+			return fmt.Errorf("%s.tools: name is required", section)
 		}
 		if seen[t.Name] {
-			return fmt.Errorf("registry.openai-compat.tools %q: declared twice", t.Name)
+			return fmt.Errorf("%s.tools %q: declared twice", section, t.Name)
 		}
 		seen[t.Name] = true
 		if _, err := toolledger.ParseClass(t.Class); err != nil {
-			return fmt.Errorf("registry.openai-compat.tools %q: %w", t.Name, err)
+			return fmt.Errorf("%s.tools %q: %w", section, t.Name, err)
 		}
 		if t.URL == "" {
-			return fmt.Errorf("registry.openai-compat.tools %q: url is required", t.Name)
+			return fmt.Errorf("%s.tools %q: url is required", section, t.Name)
 		}
 	}
 	return nil

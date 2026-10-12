@@ -28,10 +28,12 @@ import (
 	"github.com/simondxu/conductor/internal/controller/toolledger"
 	"github.com/simondxu/conductor/internal/executor"
 	"github.com/simondxu/conductor/internal/harness"
+	"github.com/simondxu/conductor/internal/harness/anthropic"
 	"github.com/simondxu/conductor/internal/harness/antigravity"
 	"github.com/simondxu/conductor/internal/harness/antigravityinteractions"
 	"github.com/simondxu/conductor/internal/harness/fake"
 	"github.com/simondxu/conductor/internal/harness/openaicompat"
+	"github.com/simondxu/conductor/internal/harness/ownedloop"
 	"github.com/simondxu/conductor/internal/harness/remote"
 	"github.com/simondxu/conductor/internal/harness/substrate"
 	"github.com/simondxu/conductor/internal/skills"
@@ -213,24 +215,29 @@ func NewControllerFromConfig(ctx context.Context, cfg *Config) (*controller.Cont
 		defaultHarnessID = config.FakeHarnessID
 	}
 
-	// OpenAI-compatible harness: a real model, recovery:full.
+	// Model harnesses whose tool loop Conductor owns: recovery:full.
 	if oc := cfg.Registry.OpenAICompat; oc.BaseURL != "" {
 		h, err := openaicompat.New(oc.Config)
 		if err != nil {
 			return nil, err
 		}
-		if err := reg.Register(config.OpenAICompatHarnessID, h, controller.RecoveryFull); err != nil {
-			return nil, fmt.Errorf("register openai-compat harness: %w", err)
+		if err := registerOwnedLoop(reg, config.OpenAICompatHarnessID, h, oc.Tools); err != nil {
+			return nil, err
 		}
-		tools := map[string]toolledger.Class{}
-		for _, t := range oc.Tools {
-			if tools[t.Name], err = toolledger.ParseClass(t.Class); err != nil {
-				return nil, fmt.Errorf("openai-compat harness tool %q: %w", t.Name, err)
-			}
-		}
-		reg.DeclareTools(config.OpenAICompatHarnessID, tools)
 		if oc.Default {
 			defaultHarnessID = config.OpenAICompatHarnessID
+		}
+	}
+	if ac := cfg.Registry.Anthropic; ac.Model != "" {
+		h, err := anthropic.New(ac.Config)
+		if err != nil {
+			return nil, err
+		}
+		if err := registerOwnedLoop(reg, config.AnthropicHarnessID, h, ac.Tools); err != nil {
+			return nil, err
+		}
+		if ac.Default {
+			defaultHarnessID = config.AnthropicHarnessID
 		}
 	}
 
@@ -298,6 +305,24 @@ func NewControllerFromConfig(ctx context.Context, cfg *Config) (*controller.Cont
 		OwnerID:  ownerID,
 		LeaseTTL: cfg.EventLog.PostgresConfig.LeaseTTL,
 	})
+}
+
+// registerOwnedLoop registers a recovery:full model harness and the recovery
+// class of each of its tools.
+func registerOwnedLoop(reg *controller.Registry, id string, h harness.Harness, tools []ownedloop.Tool) error {
+	if err := reg.Register(id, h, controller.RecoveryFull); err != nil {
+		return fmt.Errorf("register %s harness: %w", id, err)
+	}
+	classes := map[string]toolledger.Class{}
+	for _, t := range tools {
+		c, err := toolledger.ParseClass(t.Class)
+		if err != nil {
+			return fmt.Errorf("%s harness tool %q: %w", id, t.Name, err)
+		}
+		classes[t.Name] = c
+	}
+	reg.DeclareTools(id, classes)
+	return nil
 }
 
 // newFakeHarness builds the fake harness: a client of a remote
