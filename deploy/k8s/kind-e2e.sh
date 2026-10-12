@@ -96,8 +96,10 @@ pod=$(k get pods -l app.kubernetes.io/component=harness -o name)
 [[ -n "$pod" ]] || fail "no harness pod for $conv"
 if [[ -n "$gvisor" ]]; then
   [[ "$(k get "$pod" -o jsonpath='{.spec.runtimeClassName}')" == "gvisor" ]] || fail "$pod has no runtimeClassName gvisor"
-  # The kernel the harness sees: gVisor's own (its dmesg names it; its
-  # /proc/version is a fixed 4.4.0 string), not the node's.
+  # The kernel the harness sees: gVisor's own, not the node's. Its dmesg
+  # names gVisor, and its /proc/version is a fixed string dated
+  # "Sun Jan 10 15:06:54 PST 2016" ("Linux version 4.19.0-gvisor" in
+  # release-20260928.0).
   version=$(k exec "$pod" -- cat /proc/version)
   { k exec "$pod" -- dmesg 2>/dev/null | grep -q gVisor || [[ "$version" == *"Sun Jan 10 15:06:54 PST 2016"* ]]; } ||
     fail "$pod is not running under gVisor: $version"
