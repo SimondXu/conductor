@@ -692,6 +692,15 @@ process*. Stated as a named caveat beside the exactly-once prohibition
   replica takes over without waiting out the lease (`kill_kind="graceful"`).
   Each run ends once (I3′ and I1b are checked).
 
+**As built [M9]: I8.** Before a tool turn that contains an `UNSAFE` call, the
+controller requires `Remaining()` to exceed the budget, renewing once first
+if it does not. There is no tool timeout yet, so the budget is the renewal
+period, `ttl/3`. A refused turn starts nothing: its calls stay `PLANNED`, the
+run stays `PENDING`, and the reconciler runs them later under a fresh lease.
+Each decision is counted in
+`conductor_unsafe_tool_turns_total{decision="allowed|deferred"}`.
+`TestUnsafeToolNotStartedNearLeaseExpiry` falsifies it.
+
 ### 6.3 Reconnect: the `inFlight` behaviour is a user-visible contract **[R2]**
 
 `internal/server/server.go:62-65` returns
@@ -788,6 +797,7 @@ Every metric answers a stated operational question.
 | `conductor_lease_acquisitions_total` | counter | result | Failover rate and contention. |
 | `conductor_lease_losses_total` | counter | reason | `renew_timeout` · `deadline_elapsed` · `preempted` — real tuning data for TTL. |
 | `conductor_fenced_writes_rejected_total` | counter | — | **Direct evidence for I4.** |
+| `conductor_unsafe_tool_turns_total` | counter | decision | How often does I8 hold back an `UNSAFE` call? |
 | `conductor_tool_calls_total` | counter | tool, class, state | Ledger distribution. |
 | `conductor_tool_attempts_total` | counter | tool, class | Retry pressure. |
 | `conductor_tool_duration_seconds` | histogram | tool | Tool latency. |
@@ -806,6 +816,7 @@ checks for them by name):
   its own `--metrics-addr`, scraped as job `fake-harness`. Only the fake can
   see an external effect.
 - Since M7: `conductor_fenced_writes_rejected_total`.
+- Since M9: `conductor_unsafe_tool_turns_total`.
 - Since M6: `conductor_executor_acquire_duration_seconds`. It is emitted only
   where an executor is configured; the compose stack dials a fixed harness,
   so it does not have it.

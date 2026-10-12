@@ -181,11 +181,12 @@ func (d *Controller) recordLastRecovery(ctx context.Context, id string, stall fl
 // poison fails a PENDING run whose recovery keeps failing. Calls it left
 // STARTED become OUTCOME_UNKNOWN, so their deadline still bounds them (I1).
 func (d *Controller) poison(ctx context.Context, id string) error {
-	ctx, gen, release, err := d.own(ctx, id)
+	ctx, held, release, err := d.own(ctx, id)
 	if err != nil {
 		return err
 	}
 	defer release()
+	gen := generation(held)
 	events, err := d.eventLog.Events(ctx, id)
 	if err != nil {
 		return err

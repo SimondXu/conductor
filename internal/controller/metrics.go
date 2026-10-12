@@ -78,6 +78,10 @@ var (
 		Help: "Tool calls in STARTED or OUTCOME_UNKNOWN across the database, sampled each reconciler pass; " +
 			"every replica reports the same value, so aggregate with max.",
 	}, []string{"state"})
+	unsafeStarts = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "conductor_unsafe_tool_turns_total",
+		Help: "Leased tool turns with an UNSAFE call by I8 decision: allowed, or deferred because the lease had too little time left.",
+	}, []string{"decision"})
 	replayEvents = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "conductor_replay_events_total",
 		Help: "Events read to rebuild conversations, one full replay per Exec.",
