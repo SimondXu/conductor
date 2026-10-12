@@ -34,6 +34,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"google.golang.org/protobuf/types/known/structpb"
 
+	"github.com/simondxu/conductor/internal/chaos"
 	"github.com/simondxu/conductor/internal/harness"
 	"github.com/simondxu/conductor/proto"
 )
@@ -275,6 +276,9 @@ func (e *execution) toolTurn(ctx context.Context, handler harness.Handler, calls
 			}
 			if tool.CrashAfterEffect && attempt == 1 {
 				e.h.exit(CrashExitCode)
+			}
+			if attempt == 1 {
+				chaos.At(ctx, chaos.ToolEffectDone, name)
 			}
 		}
 
