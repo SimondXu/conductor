@@ -454,6 +454,26 @@ cluster, and "kept for compatibility" is a maintenance promise this project
 cannot honour. The `substrate` harness package stays in the tree, unwired, and
 documented as unsupported; Apache-2.0 attribution is unaffected.
 
+**As built [P1]: gVisor.**
+
+- **Configuration.** `registry.fake.pod.runtime_class` becomes the harness
+  pods' `runtimeClassName`. `deploy/k8s/gvisor.yaml` is the `RuntimeClass`
+  `gvisor`, with handler `runsc`. Nothing else changes: the pod lifecycle,
+  fencing and recovery are the same.
+- **The e2e.** `GVISOR=1 deploy/k8s/kind-e2e.sh`:
+  1. Installs `runsc` and its containerd shim on the kind node, from gVisor's
+     release bucket, sha512-checked.
+  2. Registers the `runsc` handler with containerd.
+  3. Runs the M6 assertion (delete the harness pod mid-tool-call; the run
+     recovers and completes) with `runtime_class: gvisor`.
+  4. Before deleting the pod, requires that it has `runtimeClassName:
+     gvisor` and that its kernel is gVisor's, by its `dmesg` or its fixed
+     `/proc/version`.
+- **Where it is checked.** The CI job `pod-executor-gvisor` runs the e2e.
+- **What isolation means here.** It is the runtime's, not Conductor's: a
+  tool still runs with the harness's privileges, inside the sandbox
+  (PRD §10).
+
 **As built [M6]** (`internal/executor`):
 
 - **`executor.Harness` adapts an `Executor` to `harness.Harness`.** `Start`

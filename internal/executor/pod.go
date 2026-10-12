@@ -63,6 +63,10 @@ type Pod struct {
 	// deleted harness keeps running, and maybe keeps executing a tool
 	// (ARCHITECTURE.md §6.2).
 	GracePeriod int64
+	// RuntimeClass is the pod's runtimeClassName, "gvisor" for example; empty
+	// for the cluster's default runtime. Isolation is the runtime's
+	// property, not Conductor's (PRD.md §10).
+	RuntimeClass string
 }
 
 var _ Executor = (*Pod)(nil)
@@ -135,6 +139,10 @@ func (p *Pod) podSpec(name, conversationID string, gen int64) *corev1.Pod {
 		}}}
 	}
 	grace := p.GracePeriod
+	var runtimeClass *string
+	if p.RuntimeClass != "" {
+		runtimeClass = &p.RuntimeClass
+	}
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: name,
@@ -151,6 +159,7 @@ func (p *Pod) podSpec(name, conversationID string, gen int64) *corev1.Pod {
 			// generation, never restarted in place.
 			RestartPolicy:                 corev1.RestartPolicyNever,
 			TerminationGracePeriodSeconds: &grace,
+			RuntimeClassName:              runtimeClass,
 		},
 	}
 }

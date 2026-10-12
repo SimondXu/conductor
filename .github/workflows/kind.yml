@@ -43,3 +43,28 @@ jobs:
       run: |
         kubectl --context kind-conductor-e2e -n conductor get pods -o wide
         kubectl --context kind-conductor-e2e -n conductor logs deploy/conductor --tail 200
+
+  # P1: the same assertion with the harness pods under gVisor (RuntimeClass
+  # gvisor, handler runsc installed on the kind node), and a check that the
+  # harness really sees gVisor's kernel.
+  pod-executor-gvisor:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - uses: actions/setup-go@v4
+      with:
+        go-version-file: go.mod
+
+    - name: Install kind
+      run: go install sigs.k8s.io/kind@v0.33.0
+
+    - name: Delete the executor pod under gVisor, expect recovery
+      run: PATH="$(go env GOPATH)/bin:$PATH" GVISOR=1 ./deploy/k8s/kind-e2e.sh
+
+    - name: State on failure
+      if: failure()
+      run: |
+        kubectl --context kind-conductor-e2e-gvisor -n conductor get pods -o wide
+        kubectl --context kind-conductor-e2e-gvisor -n conductor describe pods -l app.kubernetes.io/component=harness | tail -40
+        kubectl --context kind-conductor-e2e-gvisor -n conductor logs deploy/conductor --tail 200

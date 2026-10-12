@@ -127,3 +127,15 @@ func TestPod_AcquireFailsWhenThePodExits(t *testing.T) {
 		t.Fatalf("failed pod left behind: %v", err)
 	}
 }
+
+// A configured runtime class reaches the pod; none leaves the cluster default.
+func TestPod_RuntimeClass(t *testing.T) {
+	p, _ := newPod()
+	if got := p.podSpec("n", "conv", 1).Spec.RuntimeClassName; got != nil {
+		t.Fatalf("runtimeClassName = %q with none configured, want unset", *got)
+	}
+	p.RuntimeClass = "gvisor"
+	if got := p.podSpec("n", "conv", 1).Spec.RuntimeClassName; got == nil || *got != "gvisor" {
+		t.Fatalf("runtimeClassName = %v, want gvisor", got)
+	}
+}
