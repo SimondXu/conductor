@@ -88,6 +88,9 @@ type PostgresConfig struct {
 	// LeaseTTL is how long a conversation lease lasts without renewal, so
 	// how long a killed controller's runs wait before recovery. Default 30s.
 	LeaseTTL time.Duration `yaml:"lease_ttl,omitempty"`
+	// OwnerID names this controller in the lease table. Default: hostname,
+	// pid and a random suffix.
+	OwnerID string `yaml:"owner_id,omitempty"`
 }
 
 // EventLogConfig configures the event log storage.

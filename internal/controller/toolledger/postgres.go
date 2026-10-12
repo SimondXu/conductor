@@ -104,6 +104,28 @@ func (p *Postgres) Settle(ctx context.Context, gen int64, callID string, out Out
 		callID, gen, string(out.State), result, out.Error)
 }
 
+// Override records an operator's finding about an ABANDONED call, from a
+// check outside Conductor, as SUCCEEDED or FAILED with the reason
+// (ARCHITECTURE.md §10, conductor inspect tool --settle). The run the call
+// failed stays failed; the ledger just stops claiming less than is known.
+func (p *Postgres) Override(ctx context.Context, gen int64, callID string, state State, reason string) error {
+	if state != Succeeded && state != Failed {
+		return fmt.Errorf("%w: override to %s", ErrTransition, state)
+	}
+	// transition takes a call already in the target state as a no-op; an
+	// operator must hear that the call was not ABANDONED.
+	var prev State
+	if err := p.db.QueryRowContext(ctx, "SELECT state FROM tool_calls WHERE call_id = $1", callID).Scan(&prev); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("toolledger: override %s: %w", callID, err)
+	}
+	if prev != Abandoned {
+		return fmt.Errorf("%w: override %s, which is %q, not ABANDONED", ErrTransition, callID, prev)
+	}
+	return p.transition(ctx, gen, callID, state, []State{Abandoned}, `
+		state = $3, error = $4, settled_at = now(), generation = $2`,
+		callID, gen, string(state), "operator: "+reason)
+}
+
 func (p *Postgres) MarkUnknown(ctx context.Context, gen int64, callID, reason string) error {
 	return p.transition(ctx, gen, callID, OutcomeUnknown, []State{Started}, `
 		state = 'OUTCOME_UNKNOWN', error = $3, generation = $2`,

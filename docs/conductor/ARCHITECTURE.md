@@ -1033,3 +1033,25 @@ Revision 1 listed these as open. All six are now decided.
 | **`UNSAFE` default** | **Fail the run**, `ABANDONED`, with the nature of the uncertainty in `error`. Plus an operator write path: `conductor inspect tool --settle <call_id> --outcome ... --reason ...`. | Parking requires durable HITL, which is out of scope, and an unresolvable parked state is an unbounded leak that makes I1 unfalsifiable. The ~30-line CLI write path turns "manual resolution" from aspiration into a real mechanism while `ABANDONED` stays settled. |
 | **SQLite** | **No lease at all.** `Acquire` returns `ErrUnsupported` unless `--single-process`; `serve` refuses `CONDUCTOR_REPLICAS > 1`; `doctor` reports `ownership=process-local`. Every invariant is asserted on PostgreSQL only. | A degraded lease that looks like fencing invites a deployment and then a correctness bug filed against the central claim. SQLite's only job is the zero-dependency local demo. |
 | **Binary rename** | **At the first new command (`inspect`)**, as one mechanical commit: `cmd/ax` → `cmd/conductor`, flag/env prefixes, `conductor.yaml` (still accepting `ax.yaml` for one release). No `ax` alias. | Earlier and every doc fragment is written once; later and README, compose, manifests, bench scripts and PRD all need rewriting. The current state — module renamed but binary, config name, `AX_HARNESS_WORKDIR` (`antigravityinteractions.go:381`), `config.AXAssetsDir()` and `defaultNamespace = "ax"` still `ax` — is the worst of both. |
+
+**As built: `conductor inspect`.** `conversation`, `tools` and `runs` read
+PostgreSQL directly, as tables or with `--json`. `inspect tool --settle`
+overrides only an `ABANDONED` call, to `SUCCEEDED` or `FAILED`, with
+`error = 'operator: <reason>'`. Any other state is refused, including a call
+already in the requested state, so the operator never gets a silent no-op.
+It takes the conversation's lease for the write: it is fenced like any other
+write, and refused while a controller owns the conversation. The run stays
+failed. `--settle` accepts a unique prefix of the call_id, because `tools`
+prints call ids shortened.
+
+**As built: SQLite and `serve` flags.** On SQLite no lease is constructed at
+all, rather than one whose `Acquire` returns `ErrUnsupported`. There is no
+`--single-process` flag: a single process is the only mode SQLite has.
+- `serve` logs a warning on SQLite.
+- `serve` refuses to start when `CONDUCTOR_REPLICAS > 1` and the event log
+  is SQLite.
+- `doctor --config` prints `ownership=postgres-lease` or
+  `ownership=process-local`.
+- `serve` takes PRD §5's `--owner-id` and `--lease-ttl`, which override
+  `eventlog.postgres.owner_id` and `lease_ttl`, and `--recovery-interval`
+  and `--recovery-concurrency`.

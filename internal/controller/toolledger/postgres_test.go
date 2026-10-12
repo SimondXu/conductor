@@ -265,3 +265,33 @@ func TestCallIDIsStableAndSensitive(t *testing.T) {
 		}
 	}
 }
+
+// An operator may record what an ABANDONED call really did, and nothing
+// else: not a call still in flight, and not back to ABANDONED.
+func TestOverrideOnlyFromAbandoned(t *testing.T) {
+	l := openTestLedger(t)
+	ctx := context.Background()
+	id := plan(t, l, 1)
+	if err := l.Start(ctx, 0, id); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.Override(ctx, 0, id, Succeeded, "checked"); !errors.Is(err, ErrTransition) {
+		t.Fatalf("override STARTED: err = %v, want ErrTransition", err)
+	}
+	if err := l.Settle(ctx, 0, id, Outcome{State: Abandoned, Error: "unknown"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.Override(ctx, 0, id, Abandoned, "x"); !errors.Is(err, ErrTransition) {
+		t.Fatalf("override to ABANDONED: err = %v, want ErrTransition", err)
+	}
+	if err := l.Override(ctx, 0, id, Succeeded, "the email is in the provider's sent log"); err != nil {
+		t.Fatal(err)
+	}
+	if c := only(t, l); c.State != Succeeded || c.Error != "operator: the email is in the provider's sent log" {
+		t.Fatalf("after override: %s %q", c.State, c.Error)
+	}
+	// Not a silent no-op on a call that is no longer ABANDONED.
+	if err := l.Override(ctx, 0, id, Succeeded, "again"); !errors.Is(err, ErrTransition) {
+		t.Fatalf("override SUCCEEDED: err = %v, want ErrTransition", err)
+	}
+}

@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -38,6 +39,9 @@ var (
 	serveConfigFile   string
 	serveMetricsAddr  string
 	serveDrainTimeout time.Duration
+	serveOwnerID      string
+	serveLeaseTTL     time.Duration
+	serveReconciler   controller.ReconcilerConfig
 )
 
 var serveCmd = &cobra.Command{
@@ -52,6 +56,10 @@ func init() {
 	serveCmd.Flags().StringVar(&serveConfigFile, "config", defaultConfigFile, "Path to YAML configuration file")
 	serveCmd.Flags().StringVar(&serveMetricsAddr, "metrics-addr", ":9090", "Address for the Prometheus /metrics endpoint; empty disables it")
 	serveCmd.Flags().DurationVar(&serveDrainTimeout, "drain-timeout", 20*time.Second, "On SIGTERM, how long runs in flight may finish before they are canceled and their leases released")
+	serveCmd.Flags().StringVar(&serveOwnerID, "owner-id", "", "This controller's name in the lease table (default: eventlog.postgres.owner_id, else hostname/pid/random)")
+	serveCmd.Flags().DurationVar(&serveLeaseTTL, "lease-ttl", 0, "Conversation lease ttl (default: eventlog.postgres.lease_ttl, else 30s)")
+	serveCmd.Flags().DurationVar(&serveReconciler.Interval, "recovery-interval", 5*time.Second, "Pause between reconciler passes, plus up to 20% jitter")
+	serveCmd.Flags().IntVar(&serveReconciler.Concurrency, "recovery-concurrency", 4, "Runs the reconciler recovers at once")
 }
 
 func runServe(cmd *cobra.Command, args []string) error {
@@ -68,6 +76,19 @@ func runServe(cmd *cobra.Command, args []string) error {
 	// Validate configuration
 	if err := cfg.Validate(); err != nil {
 		return fmt.Errorf("invalid configuration: %w", err)
+	}
+	if serveOwnerID != "" {
+		cfg.EventLog.PostgresConfig.OwnerID = serveOwnerID
+	}
+	if serveLeaseTTL != 0 {
+		cfg.EventLog.PostgresConfig.LeaseTTL = serveLeaseTTL
+	}
+	// SQLite has no lease, so a second replica would write the same
+	// conversations unfenced (PRD.md §6.4): refuse, do not degrade.
+	if cfg.EventLog.PostgresConfig.DSN == "" {
+		if n, _ := strconv.Atoi(os.Getenv("CONDUCTOR_REPLICAS")); n > 1 {
+			return fmt.Errorf("CONDUCTOR_REPLICAS=%d needs PostgreSQL: on SQLite ownership is process-local and replicas would not be fenced", n)
+		}
 	}
 
 	// Initialize OpenTelemetry SDK
@@ -125,7 +146,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	if cfg.EventLog.PostgresConfig.DSN != "" {
 		go func() {
 			defer close(recDone)
-			if err := c.RunReconciler(recCtx, controller.ReconcilerConfig{}); err != nil {
+			if err := c.RunReconciler(recCtx, serveReconciler); err != nil {
 				slog.ErrorContext(ctx, "reconciler exited", slog.Any("error", err))
 			}
 		}()
