@@ -24,6 +24,7 @@ import (
 
 	"github.com/simondxu/conductor/cmd/conductor/internal/cliutil"
 	"github.com/spf13/cobra"
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -56,6 +57,7 @@ func init() {
 func connect(server string) (*grpc.ClientConn, error) {
 	conn, err := grpc.NewClient(server,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithStatsHandler(otelgrpc.NewClientHandler()),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to server: %w", err)

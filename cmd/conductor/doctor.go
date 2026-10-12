@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"charm.land/lipgloss/v2"
+	"github.com/simondxu/conductor/cmd/conductor/internal/cliutil"
 	"github.com/simondxu/conductor/internal/config"
 	"github.com/spf13/cobra"
 )
@@ -46,12 +47,48 @@ var doctorCmd = &cobra.Command{
 	SilenceUsage: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		printStatus(os.Stdout, doctorEndpoint)
+		cfg, err := newConfig(cmd, doctorConfigFile)
+		if err != nil {
+			return err
+		}
+		fmt.Println(ownership(cfg.EventLog.PostgresConfig.DSN))
+		for _, line := range recoveryLines(cfg) {
+			fmt.Println(line)
+		}
 		return nil
 	},
 }
 
+var doctorConfigFile string
+
+// ownership is doctor's ownership line (PRD.md §6.4).
+func ownership(postgresDSN string) string {
+	if postgresDSN != "" {
+		return "ownership=postgres-lease (fenced; multi-replica safe)"
+	}
+	return "ownership=process-local (SQLite: single process only, no recovery)"
+}
+
+// recoveryLines is each configured harness's recovery class (PRD.md §6.5):
+// full only where Conductor owns the tool loop. It mirrors the registrations
+// in cliutil.NewControllerFromConfig, without starting any harness.
+func recoveryLines(cfg *cliutil.Config) []string {
+	var out []string
+	if !cfg.Antigravity.Disabled && !cfg.Registry.Antigravity.Disabled {
+		out = append(out, config.AntigravityHarnessID+" recovery=none (tool loop in the Python sidecar)")
+	}
+	out = append(out,
+		config.AntigravityInteractionsHarnessID+" recovery=none (tool loop in the harness, model state remote)",
+		config.FakeHarnessID+" recovery=full")
+	for _, sc := range cfg.Registry.Substrate {
+		out = append(out, sc.ID+" recovery=none (tool loop in the remote actor)")
+	}
+	return out
+}
+
 func init() {
 	doctorCmd.Flags().StringVar(&doctorEndpoint, "endpoint", "127.0.0.1:50053", "Harness gRPC endpoint to monitor")
+	doctorCmd.Flags().StringVar(&doctorConfigFile, "config", defaultConfigFile, "Path to YAML configuration file")
 }
 
 // Stats holds the sampled metrics and state of the AX system.

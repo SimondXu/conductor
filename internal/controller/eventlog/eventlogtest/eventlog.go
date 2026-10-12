@@ -28,7 +28,7 @@ type MemoryEventLog struct {
 	AllEvents     []*proto.StepEvent
 }
 
-func (m *MemoryEventLog) Append(_ context.Context, event *proto.StepEvent) (int64, error) {
+func (m *MemoryEventLog) Append(_ context.Context, event *proto.StepEvent, _ int64) (int64, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -36,6 +36,9 @@ func (m *MemoryEventLog) Append(_ context.Context, event *proto.StepEvent) (int6
 	for _, ev := range m.AllEvents {
 		if ev.ConversationId == event.ConversationId {
 			maxStep++
+			if event.EventId != "" && ev.EventId == event.EventId {
+				return maxStep, nil // idempotent retry (I10)
+			}
 		}
 	}
 	step := maxStep + 1
@@ -54,6 +57,15 @@ func (m *MemoryEventLog) Events(_ context.Context, conversationID string) ([]*pr
 		}
 	}
 	return out, nil
+}
+
+// EventsSince returns the conversation's events after afterStep.
+func (m *MemoryEventLog) EventsSince(ctx context.Context, conversationID string, afterStep int64) ([]*proto.StepEvent, error) {
+	events, _ := m.Events(ctx, conversationID)
+	if afterStep >= int64(len(events)) {
+		return nil, nil
+	}
+	return events[afterStep:], nil
 }
 
 // Drop removes every event for which drop returns true.

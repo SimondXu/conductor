@@ -17,9 +17,13 @@ package toolledger
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"slices"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
+
+	"github.com/simondxu/conductor/internal/controller/lease"
 )
 
 // Postgres is the Ledger on the tool_calls table (migration 0002).
@@ -47,25 +51,41 @@ func (p *Postgres) Plan(ctx context.Context, gen int64, calls ...PlannedCall) er
 		return fmt.Errorf("toolledger: plan: %w", err)
 	}
 	defer tx.Rollback()
+	fenced := map[string]bool{}
+	var inserted []PlannedCall
 	for _, c := range calls {
-		if _, err := tx.ExecContext(ctx, `
+		if !fenced[c.ConversationID] {
+			if err := lease.CheckFence(ctx, tx, c.ConversationID, gen); err != nil {
+				return err
+			}
+			fenced[c.ConversationID] = true
+		}
+		res, err := tx.ExecContext(ctx, `
 			INSERT INTO tool_calls (call_id, conversation_id, step, tool_name, args_hash, args,
 			                        idempotency_key, class, state, generation)
 			VALUES ($1, $2, $3, $4, $5, $6, $1, $7, 'PLANNED', $8)
 			ON CONFLICT (call_id) DO NOTHING`,
-			c.CallID, c.ConversationID, c.Step, c.ToolName, c.ArgsHash, string(c.Args), string(c.Class), gen); err != nil {
+			c.CallID, c.ConversationID, c.Step, c.ToolName, c.ArgsHash, string(c.Args), string(c.Class), gen)
+		if err != nil {
 			return fmt.Errorf("toolledger: plan %s: %w", c.CallID, err)
 		}
+		if n, _ := res.RowsAffected(); n == 1 {
+			inserted = append(inserted, c)
+		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	for _, c := range inserted {
+		toolCalls.WithLabelValues(c.ToolName, string(c.Class), string(Planned)).Inc()
+	}
+	return nil
 }
 
 func (p *Postgres) Start(ctx context.Context, gen int64, callID string) error {
-	return p.transition(ctx, callID, Started, `
-		UPDATE tool_calls
-		   SET state = 'STARTED', attempts = attempts + 1, started_at = now(),
-		       reconcile_deadline = now() + make_interval(secs => $3), generation = $2
-		 WHERE call_id = $1 AND state IN ('PLANNED', 'OUTCOME_UNKNOWN')`,
+	return p.transition(ctx, gen, callID, Started, []State{Planned, OutcomeUnknown}, `
+		state = 'STARTED', attempts = t.attempts + 1, started_at = now(),
+		reconcile_deadline = now() + make_interval(secs => $3), generation = $2`,
 		callID, gen, ReconcileWindow.Seconds())
 }
 
@@ -79,38 +99,126 @@ func (p *Postgres) Settle(ctx context.Context, gen int64, callID string, out Out
 	if out.Result != nil {
 		result = string(out.Result)
 	}
-	return p.transition(ctx, callID, out.State, `
-		UPDATE tool_calls
-		   SET state = $3, result = $4, error = NULLIF($5, ''), settled_at = now(), generation = $2
-		 WHERE call_id = $1 AND state IN ('STARTED', 'OUTCOME_UNKNOWN')`,
+	return p.transition(ctx, gen, callID, out.State, []State{Started, OutcomeUnknown}, `
+		state = $3, result = $4, error = NULLIF($5, ''), settled_at = now(), generation = $2`,
 		callID, gen, string(out.State), result, out.Error)
 }
 
+// Override records an operator's finding about an ABANDONED call, from a
+// check outside Conductor, as SUCCEEDED or FAILED with the reason
+// (ARCHITECTURE.md §10, conductor inspect tool --settle). The run the call
+// failed stays failed; the ledger just stops claiming less than is known.
+func (p *Postgres) Override(ctx context.Context, gen int64, callID string, state State, reason string) error {
+	if state != Succeeded && state != Failed {
+		return fmt.Errorf("%w: override to %s", ErrTransition, state)
+	}
+	// transition takes a call already in the target state as a no-op; an
+	// operator must hear that the call was not ABANDONED.
+	var prev State
+	if err := p.db.QueryRowContext(ctx, "SELECT state FROM tool_calls WHERE call_id = $1", callID).Scan(&prev); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("toolledger: override %s: %w", callID, err)
+	}
+	if prev != Abandoned {
+		return fmt.Errorf("%w: override %s, which is %q, not ABANDONED", ErrTransition, callID, prev)
+	}
+	return p.transition(ctx, gen, callID, state, []State{Abandoned}, `
+		state = $3, error = $4, settled_at = now(), generation = $2`,
+		callID, gen, string(state), "operator: "+reason)
+}
+
 func (p *Postgres) MarkUnknown(ctx context.Context, gen int64, callID, reason string) error {
-	return p.transition(ctx, callID, OutcomeUnknown, `
-		UPDATE tool_calls SET state = 'OUTCOME_UNKNOWN', error = $3, generation = $2
-		 WHERE call_id = $1 AND state = 'STARTED'`,
+	return p.transition(ctx, gen, callID, OutcomeUnknown, []State{Started}, `
+		state = 'OUTCOME_UNKNOWN', error = $3, generation = $2`,
 		callID, gen, reason)
 }
 
-// transition runs a guarded UPDATE. When it matches no row, a call already in
-// the target state is a no-op; anything else is ErrTransition.
-func (p *Postgres) transition(ctx context.Context, callID string, target State, query string, args ...any) error {
-	res, err := p.db.ExecContext(ctx, query, args...)
+// transition moves callID from one of from to target with the assignments
+// set ($1 is the call_id), fenced on gen (I4). The row is locked first, so
+// the state it moved from is exact, for the metrics. A call already in the
+// target state is a no-op; any other state is ErrTransition.
+func (p *Postgres) transition(ctx context.Context, gen int64, callID string, target State, from []State, set string, args ...any) error {
+	tx, err := p.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("toolledger: %s %s: %w", target, callID, err)
 	}
-	if n, err := res.RowsAffected(); err != nil || n == 1 {
+	defer tx.Rollback()
+	var prev State
+	var conv, tool string
+	var class Class
+	err = tx.QueryRowContext(ctx, `
+		SELECT state, conversation_id, tool_name, class FROM tool_calls WHERE call_id = $1 FOR UPDATE`,
+		callID).Scan(&prev, &conv, &tool, &class)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("%w: %s %s: no such call", ErrTransition, target, callID)
+	}
+	if err != nil {
+		return fmt.Errorf("toolledger: %s %s: %w", target, callID, err)
+	}
+	if err := lease.CheckFence(ctx, tx, conv, gen); err != nil {
 		return err
 	}
-	var current State
-	if err := p.db.QueryRowContext(ctx, "SELECT state FROM tool_calls WHERE call_id = $1", callID).Scan(&current); err != nil {
-		return fmt.Errorf("%w: %s %s: %v", ErrTransition, target, callID, err)
+	if !slices.Contains(from, prev) {
+		if prev == target && target != Started {
+			return nil
+		}
+		return fmt.Errorf("%w: %s -> %s for %s", ErrTransition, prev, target, callID)
 	}
-	if current == target && target != Started {
-		return nil
+	var secs float64
+	if err := tx.QueryRowContext(ctx, `UPDATE tool_calls t SET `+set+` WHERE call_id = $1
+		RETURNING COALESCE(EXTRACT(EPOCH FROM settled_at - started_at), 0)::float8`, args...).Scan(&secs); err != nil {
+		return fmt.Errorf("toolledger: %s %s: %w", target, callID, err)
 	}
-	return fmt.Errorf("%w: %s -> %s for %s", ErrTransition, current, target, callID)
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("toolledger: %s %s: %w", target, callID, err)
+	}
+	observeTransition(prev, target, tool, class, secs)
+	return nil
+}
+
+// DeadlineExceeded is the error of a call abandoned at its reconcile_deadline.
+const DeadlineExceeded = "reconcile_deadline_exceeded"
+
+func (p *Postgres) ExpireDeadlines(ctx context.Context) (int, error) {
+	rows, err := p.db.QueryContext(ctx, `
+		UPDATE tool_calls SET state = 'ABANDONED', error = $1, settled_at = now()
+		 WHERE state = 'OUTCOME_UNKNOWN' AND reconcile_deadline < now()
+		RETURNING tool_name, class`, DeadlineExceeded)
+	if err != nil {
+		return 0, fmt.Errorf("toolledger: expire deadlines: %w", err)
+	}
+	defer rows.Close()
+	n := 0
+	for rows.Next() {
+		var tool string
+		var class Class
+		if err := rows.Scan(&tool, &class); err != nil {
+			return n, fmt.Errorf("toolledger: expire deadlines: %w", err)
+		}
+		toolCalls.WithLabelValues(tool, string(class), string(Abandoned)).Inc()
+		outcomeUnknown.WithLabelValues(tool, resolutionDeadline).Inc()
+		n++
+	}
+	return n, rows.Err()
+}
+
+func (p *Postgres) CountUnsettled(ctx context.Context) (map[State]int, error) {
+	rows, err := p.db.QueryContext(ctx, `
+		SELECT state, count(*) FROM tool_calls
+		 WHERE state IN ('STARTED', 'OUTCOME_UNKNOWN') GROUP BY state`)
+	if err != nil {
+		return nil, fmt.Errorf("toolledger: count unsettled: %w", err)
+	}
+	defer rows.Close()
+	out := map[State]int{}
+	for rows.Next() {
+		var s State
+		var n int
+		if err := rows.Scan(&s, &n); err != nil {
+			return nil, fmt.Errorf("toolledger: count unsettled: %w", err)
+		}
+		out[s] = n
+	}
+	return out, rows.Err()
 }
 
 func (p *Postgres) Calls(ctx context.Context, conversationID string) ([]ToolCall, error) {

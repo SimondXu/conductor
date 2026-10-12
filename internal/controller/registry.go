@@ -82,6 +82,17 @@ func (r *Registry) Recovery(id string) Recovery {
 	return r.recovery[id]
 }
 
+// HarnessIDs returns the ids of every registered harness.
+func (r *Registry) HarnessIDs() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	ids := make([]string, 0, len(r.harnesses))
+	for id := range r.harnesses {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
 // Harness retrieves a harness by id.
 func (r *Registry) Harness(id string) (harness.Harness, error) {
 	r.mu.RLock()

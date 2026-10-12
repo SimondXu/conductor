@@ -183,6 +183,26 @@ func TestCrashAfterEffectExitsOnlyOnFirstEffect(t *testing.T) {
 	}
 }
 
+func TestIdempotentToolPerformsOneEffectPerKey(t *testing.T) {
+	effects := &MemoryEffects{}
+	h := New(effects)
+	cfg := strings.Replace(toolCfg, "%s", `{"idempotent":true}`, 1)
+	history := []*proto.Step{harnesstest.UserStep("go")}
+	calls, err := turn(t, h, cfg, history)
+	if err != nil {
+		t.Fatal(err)
+	}
+	history = append(history, calls...)
+	for range 2 {
+		if _, err := turn(t, h, cfg, history); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(effects.Effects) != 1 {
+		t.Errorf("effects = %d, want 1 for a repeated key", len(effects.Effects))
+	}
+}
+
 func TestDuplicateResultReportsTwice(t *testing.T) {
 	cfg := strings.Replace(toolCfg, "%s", `{"duplicate_result":true}`, 1)
 	got := play(t, New(&MemoryEffects{}), cfg, []*proto.Step{harnesstest.UserStep("go")})

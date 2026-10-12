@@ -30,14 +30,17 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/simondxu/conductor/internal/config"
 	"github.com/simondxu/conductor/internal/harness/antigravity"
 	"github.com/simondxu/conductor/internal/harness/antigravityinteractions"
 	"github.com/simondxu/conductor/internal/harness/fake"
 	"github.com/simondxu/conductor/internal/harness/remote"
 	"github.com/simondxu/conductor/internal/pythonsidecar"
+	"github.com/simondxu/conductor/internal/telemetry"
 	"github.com/simondxu/conductor/proto"
 	"github.com/spf13/cobra"
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/health"
@@ -48,6 +51,7 @@ var (
 	harnessPort       int
 	harnessHost       string
 	harnessEffectsDSN string
+	harnessMetrics    string
 )
 
 // harnessReadyzPort is the port for the HTTP /readyz readiness endpoint.
@@ -65,6 +69,7 @@ func init() {
 	harnessCmd.Flags().IntVar(&harnessPort, "port", 50053, "Port for the HarnessService to listen on")
 	harnessCmd.Flags().StringVar(&harnessHost, "host", "127.0.0.1", "Host interface for the HarnessService to bind")
 	harnessCmd.Flags().StringVar(&harnessEffectsDSN, "effects-dsn", "", "fake only: Postgres DSN for the fake_effects table (default: in memory)")
+	harnessCmd.Flags().StringVar(&harnessMetrics, "metrics-addr", "", "fake only: address for the Prometheus /metrics endpoint (conductor_duplicate_effects_total); empty disables it")
 	rootCmd.AddCommand(harnessCmd)
 }
 
@@ -218,11 +223,26 @@ func runFakeHarness(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	srv := grpc.NewServer()
+	shutdown, err := telemetry.FromEnv(ctx, "fake-harness")
+	if err != nil {
+		return err
+	}
+	defer shutdown(context.Background())
+	srv := grpc.NewServer(grpc.StatsHandler(otelgrpc.NewServerHandler()))
 	proto.RegisterHarnessServiceServer(srv, remote.NewServer(fake.New(effects)))
 	hs := health.NewServer()
 	hs.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)
 	healthpb.RegisterHealthServer(srv, hs)
+
+	if harnessMetrics != "" {
+		mux := http.NewServeMux()
+		mux.Handle("/metrics", promhttp.Handler())
+		go func() {
+			if err := http.ListenAndServe(harnessMetrics, mux); err != nil {
+				log.Printf("metrics server on %s exited: %v", harnessMetrics, err)
+			}
+		}()
+	}
 
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()

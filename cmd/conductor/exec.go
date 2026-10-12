@@ -28,10 +28,15 @@ import (
 
 	"github.com/simondxu/conductor/cmd/conductor/internal"
 	"github.com/simondxu/conductor/cmd/conductor/internal/cliutil"
+	"github.com/simondxu/conductor/internal/telemetry"
 	"github.com/simondxu/conductor/proto"
 	"github.com/google/uuid"
 	"github.com/mattn/go-isatty"
 	"github.com/spf13/cobra"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+	"google.golang.org/grpc"
 )
 
 var (
@@ -43,6 +48,7 @@ var (
 	execServerAddr      string
 	execConfigFile      string
 	execResume          bool // allow resuming an execution without inputs
+	execAfterStep       int64
 )
 
 var execCmd = &cobra.Command{
@@ -51,7 +57,12 @@ var execCmd = &cobra.Command{
 	Aliases: []string{"exec"},
 	Short:   "Execute a conversation or resume an existing one",
 	Long: `Execute a new conversation or resume an existing one.
-If no conversation ID is provided, a new UUID will be generated.`,
+If no conversation ID is provided, a new UUID will be generated.
+
+If the connection to the server drops, the run carries on without you.
+Re-attach with --server <addr> --conversation <id> --resume --after-step <N>,
+N being the last step printed: you are sent the steps after N, then the live
+ones until the run ends.`,
 	SilenceUsage: true,
 	RunE:         runExec,
 }
@@ -64,7 +75,8 @@ func registerExecFlags(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&execInput, "input", "", "Input message to send (optional)")
 	cmd.Flags().StringVar(&execServerAddr, "server", "", "gRPC controller server address (if specified, connects to remote server; otherwise runs an in-process controller)")
 	cmd.Flags().StringVar(&execConfigFile, "config", defaultConfigFile, "Path to YAML configuration file (only used with an in-process controller)")
-	cmd.Flags().BoolVar(&execResume, "resume", false, "Resume a conversation without inputs")
+	cmd.Flags().BoolVar(&execResume, "resume", false, "Resume a conversation without inputs; with --server, re-attach to it")
+	cmd.Flags().Int64Var(&execAfterStep, "after-step", 0, "With --server --resume: the last step you saw; later steps are sent first")
 	cmd.MarkFlagsMutuallyExclusive("input", "resume")
 	cmd.MarkFlagsMutuallyExclusive("agent-config", "agent-config-file")
 }
@@ -139,6 +151,18 @@ func runExec(cmd *cobra.Command, args []string) error {
 		agentConfig = []byte(execAgentConfig)
 	}
 
+	if execServerAddr != "" {
+		// The client's span roots the run's trace (ARCHITECTURE.md §7.1).
+		shutdown, err := telemetry.FromEnv(ctx, "conductor-cli")
+		if err != nil {
+			return err
+		}
+		defer shutdown(context.Background())
+		var span trace.Span
+		ctx, span = otel.Tracer("conductor.cli").Start(ctx, "conductor.run",
+			trace.WithAttributes(attribute.String("conversation_id", execConversationID)))
+		defer span.End()
+	}
 	return execLoop(ctx, execConversationID, execAgentID, agentConfig, execInput)
 }
 
@@ -372,8 +396,14 @@ func runExecServer(ctx context.Context, d *internal.Display, req *proto.CreateIn
 	}
 	defer conn.Close()
 
-	client := proto.NewInteractionsServiceClient(conn)
-	stream, err := client.CreateInteraction(ctx, req)
+	var stream grpc.ServerStreamingClient[proto.CreateInteractionResponse]
+	if execResume {
+		stream, err = proto.NewConductorServiceClient(conn).Attach(ctx, &proto.AttachRequest{
+			ConversationId: req.ConversationId, AfterStep: execAfterStep,
+		})
+	} else {
+		stream, err = proto.NewInteractionsServiceClient(conn).CreateInteraction(ctx, req)
+	}
 	if err != nil {
 		d.StopLoading()
 		return nil, fmt.Errorf("error executing: %w", err)
@@ -389,7 +419,8 @@ func runExecServer(ctx context.Context, d *internal.Display, req *proto.CreateIn
 		}
 		if err != nil {
 			d.StopLoading()
-			return nil, fmt.Errorf("error receiving response: %w", err)
+			return nil, fmt.Errorf("error receiving response: %w (the run continues; re-attach with --conversation %s --resume --after-step %d)",
+				err, req.ConversationId, max(lastStep, execAfterStep))
 		}
 		if resp.Outputs != nil {
 			for _, step := range resp.Outputs {

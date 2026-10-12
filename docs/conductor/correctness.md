@@ -199,7 +199,9 @@ SELECT conversation_id, step, generation, prev_generation
 
 **Falsified by** `TestFencedAppendRejectsStaleGeneration` — acquire, bump
 generation from a second owner, then append with the first owner's generation
-and require an error.
+and require an error — and `TestFencedTransitionsRejectStaleGeneration` for
+the ledger. `TestReplicas_KillHolderTransfersOwnership` does both from the
+dead holder of a real takeover.
 
 Under chaos the positive evidence is
 `conductor_fenced_writes_rejected_total > 0`: if it is always zero during
@@ -253,13 +255,29 @@ rule I6 is ambiguous.
 **Falsified by** `TestRebuildIsPure` (same events ⇒ same state, repeated and
 shuffled-batch) and `TestPostRecoveryStateEqualsRebuilt`.
 
+**With replay snapshots (P1).** Replay rebuilds from the latest snapshot plus
+the events after it. The snapshot is `fold(events[1..k])`, a single event
+that rebuilds to the same state as those k events. So I6 adds one
+obligation: for every k, `rebuild(fold(events[1..k]) ++ events[k+1..])` must
+equal `rebuild(events)`. It is falsified by:
+- `TestFoldRebuildsTheSameState`, at every cut point of a real run, through
+  a protobuf round trip;
+- `TestReplay_ReadsOnlyTheTailAfterASnapshot`, where every turn of a
+  15-turn run must queue exactly the history rebuilt from the whole log, and
+  the stored snapshot must equal the fold of exactly the steps it is
+  labelled with.
+
 ### I7a — `runs` is a pure projection
 
 > `runs` is derived entirely from `conversation_log`. Dropping and rebuilding it
 > yields identical content.
 
-**Falsified by** `TestRunsProjectionRebuild`: snapshot `runs`, `TRUNCATE`,
-replay every conversation through the projector, diff.
+**Falsified by** `TestRunsProjectionMatchesLog`
+(`internal/controller/eventlog/runs_test.go`): the row the append path wrote
+is diffed against the row derived from `conversation_log` alone by the
+migration's backfill query, including across a retried append. The
+reconciler's bookkeeping columns (`recovery_attempts`, `next_attempt_at`)
+are not part of the projection.
 
 Recovery uses `runs` **only to find candidates**. Truth is always re-derived by
 `rebuild(events)`. A stale or wrong projection must degrade to "slower

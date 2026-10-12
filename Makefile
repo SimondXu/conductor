@@ -1,4 +1,4 @@
-.PHONY: all build proto test test-python clean install deps clean-logs
+.PHONY: all build proto test test-python bench clean install deps clean-logs
 
 # Build all binaries
 all: proto build
@@ -17,7 +17,7 @@ proto:
 	@export PATH=$$PATH:$$(go env GOPATH)/bin && \
 		protoc --go_out=. --go_opt=paths=source_relative \
 		       --go-grpc_out=. --go-grpc_opt=paths=source_relative \
-		       proto/ax.proto proto/content.proto
+		       proto/ax.proto proto/content.proto proto/conductor.proto
 	@python3 -m grpc_tools.protoc -I. --python_out=python --grpc_python_out=python proto/ax.proto proto/content.proto
 	@$$(go env GOPATH)/bin/addlicense -l apache python/proto/*.py
 	@echo "Protobuf generation complete!"
@@ -35,6 +35,15 @@ test:
 test-python:
 	@echo "Running Python tests..."
 	@python3 -m pytest python/antigravity/ --timeout=30 --timeout-method=thread
+
+# Load plus every failure class against the compose stack, rebuilt from this
+# tree, with the report of docs/conductor/PRD.md §8. Writes
+# bench/results/<timestamp>/results.json. Pass flags with BENCH_ARGS, e.g.
+# BENCH_ARGS="--duration 30s --repeat 5"; port overrides (GRAFANA_PORT, ...)
+# go to compose from the environment.
+bench: build
+	@docker compose -f deploy/compose/docker-compose.yml up -d --build --wait
+	@./bin/conductor bench $(BENCH_ARGS)
 
 # Clean build artifacts
 clean:

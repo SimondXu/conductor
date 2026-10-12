@@ -349,7 +349,7 @@ deleted.
 | Replay cost | Is replay getting more expensive as histories grow? (the panel that justifies snapshots) | `conductor_replay_events_total` |
 | Lease churn | Is ownership stable, or are we flapping? | `conductor_lease_acquisitions_total`, `conductor_lease_losses_total{reason}` |
 | Fenced writes | Did a stale owner try to write, and was it rejected? Direct evidence for I4. | `conductor_fenced_writes_rejected_total` |
-| Tool ledger state | How many calls are unsettled right now, and in which state? | `conductor_tool_calls_total{state}` |
+| Tool ledger state | How many calls are unsettled right now, and in which state? | `conductor_tool_calls_unsettled{state}`, `conductor_tool_calls_total{state}` |
 | Tool retry pressure | Are we re-running tools, and which ones? | `conductor_tool_attempts_total` |
 | Unknown outcomes | How often is a tool outcome genuinely unknown, and how is it resolved? | `conductor_tool_outcome_unknown_total{resolution}` |
 | Duplicate effects | Did an idempotent tool produce a second effect? Direct evidence for I2. | `conductor_duplicate_effects_total` |
@@ -367,7 +367,7 @@ values. Every one is a guess until you have a baseline.
 
 | Alert | Condition | Severity | Why |
 |---|---|---|---|
-| Unsettled tool calls | `conductor_tool_calls_total{state=~"STARTED\|OUTCOME_UNKNOWN"}` > 0 for > `<10m>` | page | A real-world effect is in an unknown state and nothing is resolving it. This is the one that justifies waking someone. |
+| Unsettled tool calls | `max(conductor_tool_calls_unsettled)` > 0 for > `<10m>` | page | A real-world effect is in an unknown state and nothing is resolving it. This is the one that justifies waking someone. |
 | Duplicate effect | `increase(conductor_duplicate_effects_total[5m])` > 0 | page | I2 violated. Should be impossible; treat as a correctness bug, not capacity. |
 | Fenced writes sustained | `rate(conductor_fenced_writes_rejected_total[5m])` > 0 for > `<5m>` | ticket | Fencing is working, but something keeps trying — usually a replica that is alive but partitioned from the DB. |
 | Recovery failing | `increase(conductor_recovery_total{result="failure"}[15m])` > `<3>` | page | Recovery itself is broken; sessions will accumulate. |
@@ -549,6 +549,20 @@ turn is still unwinding, you get gRPC `FAILED_PRECONDITION` with
 in-process guard in `internal/server/server.go:62-65` and it is intentionally
 conservative.
 
+**As built [P1].** Catch-up replay has shipped:
+- **Re-attaching.** `conductor run --server <addr> --conversation <id>
+  --resume --after-step N` re-attaches through the new
+  `ConductorService.Attach` RPC. It sends the steps after `N`, then the live
+  ones, until the run ends. It works on any replica, and it is not refused
+  while the old turn unwinds.
+- **The DoD.** After a drop, the steps received before and after the
+  reconnect are exactly the logged steps, with none lost and none
+  repeated, and the stream ends with the run.
+  `TestAttach_ReconnectGetsEveryMissedStepOnce` checks this. The design is
+  in ARCHITECTURE §6.3.
+- **What remains of the P0 behaviour.** The in-flight error still applies
+  to `CreateInteraction`, that is, to sending new input.
+
 ### 6.2 Four failure cases
 
 **The client disconnects (`Ctrl-C`, network drop, pod eviction of the caller).**
@@ -654,7 +668,7 @@ per week**, and include tests, docs, and CI for each block.
 | M1 | ① Bootstrappable | Generic remote `HarnessService` client (~80 LOC, extracted from logic duplicated in `substrate.go:194-233` and `antigravity.go:163-200`); deterministic `fake` harness with its `fake_effects` table; **`openai-compat` harness**; `docker compose` stack; migrations | `git clone && docker compose up` brings up PostgreSQL + Conductor + fake harness + Prometheus + Grafana; a full execution runs end to end with **zero API keys**; pointing `OPENAI_BASE_URL` at a local model runs the same agent; the same path runs in CI | `<4–5 weeks>` |
 | M2 | — | `docs/conductor/correctness.md` | Every invariant stated so that it names the SQL query or test that falsifies it | `<3 days>` |
 | M3 | ② Effect log | Tool call/result reach the event log; durable ledger with stable `call_id`, idempotency key, attempts, `OUTCOME_UNKNOWN` | After any injected crash, the durable state alone reconstructs which tools were called, with what arguments, what each returned, how many attempts, and each terminal state; the `OUTCOME_UNKNOWN` path has tests | `<3–4 weeks>` |
-| M4 | ② Recovery | Stop swallowing append errors (`controller.go:153-162`) and add `event_id` so the resulting retry is safe (I9, I10) — **this precedes the reconciler**; then rebuild execution state from the log, `Queue()` before `Run()` on `PENDING`, poison guard, terminal-state short circuit | `conductor run --conversation <id> --resume` works (it cannot today, for any harness); a killed controller's run is picked up and completed by another | `<2–3 weeks>` |
+| M4 | ② Recovery | Stop swallowing append errors (`controller.go:153-162`) and add `event_id` so the resulting retry is safe (I9, I10) — **this precedes the reconciler**; then rebuild execution state from the log, `Queue()` before `Run()` on `PENDING`, poison guard, terminal-state short circuit | **M4a:** `conductor run --conversation <id> --resume` completes an owned-loop run whose harness or controller died mid-tool-call, resolving each unanswered call by class (compose smoke). **M4b:** the reconciler loop in `serve`, discovering via `runs` ∪ unsettled `tool_calls` under a lease, picks up and completes a killed controller's run with no client attached | `<2–3 weeks>` |
 | M5 | ⑤a Operability (part 1) | Structured logs with `conversation_id` / `trace_id` / `owner_id` / `step`; the core metric set | Every metric in `ARCHITECTURE.md` §7.2 that does not depend on later blocks is emitted and scraped | `<1–2 weeks>` |
 | M6 | ③ Executor | `Executor` abstraction; `local` backend, then the narrowest `pod` backend. No Substrate adapter, no PDB, no resource tuning, no gVisor | On `kind`, with Agent Substrate absent, deleting the executor pod lets the session recover and complete. One assertion | `<3–5 weeks>` |
 | M7 | ④ Ownership | PostgreSQL lease + fencing generation; fenced appends; multi-replica | Three controller replicas; killing the holder transfers ownership; a write from the stale holder carrying an expired generation is rejected by the persistence layer; a rolling update produces no duplicate terminal state (this assertion moved here from M6 — it is about controller replicas and leases, not pods) | `<3–4 weeks>` |
@@ -807,7 +821,7 @@ kept unreachable is a correct `ABANDONED`, not a bug.
 | Recovery is only real for harnesses Conductor owns the tool loop for | The headline claim is narrower than "crash-recoverable agent runtime" sounds | Stated in §1 and §6.5; `doctor` reports per-harness recoverability; the recovery loop skips non-recoverable conversations instead of half-recovering them |
 | All benchmark numbers come from a harness this project wrote | A reader can dismiss them as self-dealing | Documented in §8.1; the fake harness and its scripts are in the repo and re-runnable; `openai-compat` (M1) is the path to real-model numbers, reported separately |
 | `UNSAFE` tool outcomes are genuinely unresolvable | Users may expect the runtime to fix this | `UNSAFE` is a declared property of *their* tool, not a Conductor behaviour. Conductor's contribution is recording the uncertainty durably and refusing to pretend otherwise |
-| Full-history replay cost grows with conversation length | A long conversation gets slower to recover; the current query has no `LIMIT`, no cursor, and no snapshot | `conductor_replay_events_total` makes the growth visible before it hurts; `EventsSince` supports incremental replay; snapshot/compaction is P1 and explicitly deferred, not forgotten |
+| Full-history replay cost grows with conversation length | A long conversation gets slower to recover; the current query has no `LIMIT`, no cursor, and no snapshot | `conductor_replay_events_total` makes the growth visible before it hurts; `EventsSince` supports incremental replay. **As built [P1]:** replay reads the latest snapshot plus at most ~100 events after it (2000-event log: 7.5 ms → 3.0 ms). History itself still grows, since the harness needs all of it; compaction is not done (ARCHITECTURE §6.1) |
 | Lease TTL tuning trades failover speed against false preemption | Too short preempts healthy owners during GC pauses; too long stalls sessions after a hard kill | Graceful shutdown releases leases so planned handover does not wait; `conductor_lease_losses_total{reason}` shows whether real losses are timeouts or preemptions; TTL is a flag |
 | Clock behaviour between replicas | A lease decided partly by DB time and partly by wall-clock time is wrong by the skew | All lease transitions are decided by single SQL statements using the database's `now()`; the client converts the returned remaining TTL into a local monotonic deadline and never compares a database timestamp to its own clock |
 | A conversation that deterministically crashes recovery | A poison run can cycle through every replica and wedge the cluster | Recovery attempts are counted durably before replay, with a cap after which the run is failed with an explicit reason; attempted runs are backed off in the candidate query |
@@ -838,8 +852,9 @@ model gateway. If you need any of the following, Conductor is not where it lives
   and it blocks in-process. If your CLI dies, a pending approval is lost. This
   is a known gap, not a feature in progress.
 - **Sandboxing or isolation guarantees.** Tools run with the privileges of the
-  harness process. gVisor `RuntimeClass` support is P1, and even then isolation
-  is the cluster's property, not Conductor's.
+  harness process. Since P1 the pod executor can run harnesses under gVisor
+  (`runtime_class: gvisor`), and even then isolation is the cluster's
+  property, not Conductor's.
 - **A Kubernetes operator or CRD.** The executor owns Pod lifecycle — create,
   wait ready, connect, drain, delete. It is not a controller-runtime operator,
   it defines no custom resources, and it does not schedule or autoscale.

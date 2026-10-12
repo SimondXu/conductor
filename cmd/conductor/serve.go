@@ -22,9 +22,12 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
+	"time"
 
 	"github.com/simondxu/conductor/cmd/conductor/internal/cliutil"
+	"github.com/simondxu/conductor/internal/controller"
 	"github.com/simondxu/conductor/internal/server"
 	"github.com/simondxu/conductor/internal/telemetry"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -33,8 +36,12 @@ import (
 )
 
 var (
-	serveConfigFile  string
-	serveMetricsAddr string
+	serveConfigFile   string
+	serveMetricsAddr  string
+	serveDrainTimeout time.Duration
+	serveOwnerID      string
+	serveLeaseTTL     time.Duration
+	serveReconciler   controller.ReconcilerConfig
 )
 
 var serveCmd = &cobra.Command{
@@ -48,13 +55,18 @@ Loads configuration from a YAML file (default: conductor.yaml; ax.yaml is still 
 func init() {
 	serveCmd.Flags().StringVar(&serveConfigFile, "config", defaultConfigFile, "Path to YAML configuration file")
 	serveCmd.Flags().StringVar(&serveMetricsAddr, "metrics-addr", ":9090", "Address for the Prometheus /metrics endpoint; empty disables it")
+	serveCmd.Flags().DurationVar(&serveDrainTimeout, "drain-timeout", 20*time.Second, "On SIGTERM, how long runs in flight may finish before they are canceled and their leases released")
+	serveCmd.Flags().StringVar(&serveOwnerID, "owner-id", "", "This controller's name in the lease table (default: eventlog.postgres.owner_id, else hostname/pid/random)")
+	serveCmd.Flags().DurationVar(&serveLeaseTTL, "lease-ttl", 0, "Conversation lease ttl (default: eventlog.postgres.lease_ttl, else 30s)")
+	serveCmd.Flags().DurationVar(&serveReconciler.Interval, "recovery-interval", 5*time.Second, "Pause between reconciler passes, plus up to 20% jitter")
+	serveCmd.Flags().IntVar(&serveReconciler.Concurrency, "recovery-concurrency", 4, "Runs the reconciler recovers at once")
 }
 
 func runServe(cmd *cobra.Command, args []string) error {
 	ctx := cmd.Context()
 
 	// Initialize structured logging (JSON to stdout)
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
+	slog.SetDefault(slog.New(telemetry.LogHandler{Handler: slog.NewJSONHandler(os.Stdout, nil)}))
 
 	cfg, err := newConfig(cmd, serveConfigFile)
 	if err != nil {
@@ -64,6 +76,19 @@ func runServe(cmd *cobra.Command, args []string) error {
 	// Validate configuration
 	if err := cfg.Validate(); err != nil {
 		return fmt.Errorf("invalid configuration: %w", err)
+	}
+	if serveOwnerID != "" {
+		cfg.EventLog.PostgresConfig.OwnerID = serveOwnerID
+	}
+	if serveLeaseTTL != 0 {
+		cfg.EventLog.PostgresConfig.LeaseTTL = serveLeaseTTL
+	}
+	// SQLite has no lease, so a second replica would write the same
+	// conversations unfenced (PRD.md §6.4): refuse, do not degrade.
+	if cfg.EventLog.PostgresConfig.DSN == "" {
+		if n, _ := strconv.Atoi(os.Getenv("CONDUCTOR_REPLICAS")); n > 1 {
+			return fmt.Errorf("CONDUCTOR_REPLICAS=%d needs PostgreSQL: on SQLite ownership is process-local and replicas would not be fenced", n)
+		}
 	}
 
 	// Initialize OpenTelemetry SDK
@@ -96,6 +121,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("error creating controller: %w", err)
 	}
 	defer c.Close()
+	defer c.Wait() // every Exec has released its lease before the pools close
 
 	if serveMetricsAddr != "" {
 		mux := http.NewServeMux()
@@ -112,14 +138,50 @@ func runServe(cmd *cobra.Command, args []string) error {
 	// Create server
 	srv := server.New(c)
 
+	// The reconciler finishes runs nobody is driving (ARCHITECTURE.md §6.1).
+	// It needs PostgreSQL; on SQLite ownership is process-local and there is
+	// nothing to recover from.
+	recCtx, stopReconciler := context.WithCancel(ctx)
+	recDone := make(chan struct{})
+	if cfg.EventLog.PostgresConfig.DSN != "" {
+		go func() {
+			defer close(recDone)
+			if err := c.RunReconciler(recCtx, serveReconciler); err != nil {
+				slog.ErrorContext(ctx, "reconciler exited", slog.Any("error", err))
+			}
+		}()
+	} else {
+		close(recDone)
+		slog.WarnContext(ctx, "SQLite event log: ownership is process-local and no reconciler runs; use PostgreSQL for recovery")
+	}
+	defer func() {
+		stopReconciler()
+		<-recDone
+	}()
+
 	// Setup signal handling for graceful shutdown
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
+	// On SIGTERM the reconciler stops first, then runs in flight get the
+	// drain timeout to finish. Whatever is still running is then canceled.
+	// Every Exec releases its lease on the way out, so another replica takes
+	// the run over at once instead of after the lease ttl (PRD.md §6.2).
 	go func() {
 		<-sigChan
-		slog.InfoContext(ctx, "Received interrupt, shutting down...")
-		srv.GracefulStop()
+		slog.InfoContext(ctx, "Received interrupt, draining", slog.Duration("drain_timeout", serveDrainTimeout))
+		stopReconciler()
+		stopped := make(chan struct{})
+		go func() {
+			srv.GracefulStop()
+			close(stopped)
+		}()
+		select {
+		case <-stopped:
+		case <-time.After(serveDrainTimeout):
+			slog.WarnContext(ctx, "Drain timeout: canceling runs in flight; their leases are released")
+			srv.Stop()
+		}
 	}()
 	slog.InfoContext(ctx, "Starting Conductor server", slog.String("address", cfg.Server.Address))
 	if err := srv.Serve(cfg.Server.Address); err != nil {

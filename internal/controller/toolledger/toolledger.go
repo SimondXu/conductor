@@ -117,6 +117,11 @@ type Ledger interface {
 	MarkUnknown(ctx context.Context, gen int64, callID, reason string) error
 	// Calls returns every call of a conversation, ordered by step.
 	Calls(ctx context.Context, conversationID string) ([]ToolCall, error)
+	// ExpireDeadlines abandons every OUTCOME_UNKNOWN call past its
+	// reconcile_deadline, which bounds I1, and returns how many it moved.
+	ExpireDeadlines(ctx context.Context) (int, error)
+	// CountUnsettled counts the calls in STARTED and OUTCOME_UNKNOWN.
+	CountUnsettled(ctx context.Context) (map[State]int, error)
 }
 
 // ArgsHash is the hex SHA-256 of args in canonical JSON (sorted keys).

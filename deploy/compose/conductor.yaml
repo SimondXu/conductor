@@ -16,9 +16,15 @@
 version: v1alpha
 server:
   address: 0.0.0.0:8494
+telemetry:
+  otlp:
+    enabled: true
+    endpoint: jaeger:4317
 eventlog:
   postgres:
     dsn: ${CONDUCTOR_DSN}
+    # Short, so a killed controller's runs are recovered quickly (smoke.sh).
+    lease_ttl: 5s
 registry:
   # The Go-only image has no Python, so the antigravity sidecar is off.
   antigravity:

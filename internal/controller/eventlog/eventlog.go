@@ -29,11 +29,19 @@ type EventLogBuilder func() (EventLog, error)
 // exec. Every entry is an atomic step: replaying the log in order brings
 // the executor back to a consistent state from which execution can resume.
 type EventLog interface {
-	// Append adds a step event to the end of the log.
-	Append(ctx context.Context, event *proto.StepEvent) (int64, error)
+	// Append adds a step event to the end of the log. gen is the writer's
+	// lease generation: on PostgreSQL a write at any other generation than
+	// the conversation's current one fails with lease.ErrFenced (I4). Callers
+	// must not swallow its error (I9).
+	Append(ctx context.Context, event *proto.StepEvent, gen int64) (int64, error)
 
 	// Events returns all events for the conversation.
 	Events(ctx context.Context, conversationID string) ([]*proto.StepEvent, error)
+
+	// EventsSince returns the conversation's events after afterStep. Steps
+	// run from 1 with no gaps (I5), so the i-th event returned is step
+	// afterStep+1+i.
+	EventsSince(ctx context.Context, conversationID string, afterStep int64) ([]*proto.StepEvent, error)
 
 	// Close releases the underlying resources and closes the log.
 	Close() error

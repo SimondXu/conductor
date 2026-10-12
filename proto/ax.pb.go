@@ -156,8 +156,11 @@ type StepEvent struct {
 	AgentConfig    *structpb.Struct       `protobuf:"bytes,4,opt,name=agent_config,json=agentConfig,proto3" json:"agent_config,omitempty"`
 	Steps          []*Step                `protobuf:"bytes,5,rep,name=steps,proto3" json:"steps,omitempty"`
 	State          State                  `protobuf:"varint,6,opt,name=state,proto3,enum=ax.State" json:"state,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// Client-generated id (UUID) that makes appending this event idempotent: a
+	// retried append with the same event_id returns the existing step.
+	EventId       string `protobuf:"bytes,7,opt,name=event_id,json=eventId,proto3" json:"event_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *StepEvent) Reset() {
@@ -230,6 +233,13 @@ func (x *StepEvent) GetState() State {
 		return x.State
 	}
 	return State_STATE_UNSPECIFIED
+}
+
+func (x *StepEvent) GetEventId() string {
+	if x != nil {
+		return x.EventId
+	}
+	return ""
 }
 
 type HarnessStart struct {
@@ -1520,14 +1530,15 @@ var File_proto_ax_proto protoreflect.FileDescriptor
 
 const file_proto_ax_proto_rawDesc = "" +
 	"\n" +
-	"\x0eproto/ax.proto\x12\x02ax\x1a\x1cgoogle/protobuf/struct.proto\x1a\x13proto/content.proto\"\xf3\x01\n" +
+	"\x0eproto/ax.proto\x12\x02ax\x1a\x1cgoogle/protobuf/struct.proto\x1a\x13proto/content.proto\"\x8e\x02\n" +
 	"\tStepEvent\x12'\n" +
 	"\x0fconversation_id\x18\x01 \x01(\tR\x0econversationId\x12%\n" +
 	"\x0einteraction_id\x18\x02 \x01(\tR\rinteractionId\x12\x19\n" +
 	"\bagent_id\x18\x03 \x01(\tR\aagentId\x12:\n" +
 	"\fagent_config\x18\x04 \x01(\v2\x17.google.protobuf.StructR\vagentConfig\x12\x1e\n" +
 	"\x05steps\x18\x05 \x03(\v2\b.ax.StepR\x05steps\x12\x1f\n" +
-	"\x05state\x18\x06 \x01(\x0e2\t.ax.StateR\x05state\"Q\n" +
+	"\x05state\x18\x06 \x01(\x0e2\t.ax.StateR\x05state\x12\x19\n" +
+	"\bevent_id\x18\a \x01(\tR\aeventId\"Q\n" +
 	"\fHarnessStart\x12!\n" +
 	"\fagent_config\x18\x01 \x01(\fR\vagentConfig\x12\x1e\n" +
 	"\x05steps\x18\x02 \x03(\v2\b.ax.StepR\x05steps\"9\n" +

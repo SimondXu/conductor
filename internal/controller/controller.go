@@ -18,15 +18,26 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"slices"
+	"sync"
 	"time"
 
+	"github.com/google/uuid"
+	"github.com/simondxu/conductor/internal/chaos"
 	"github.com/simondxu/conductor/internal/controller/eventlog"
+	"github.com/simondxu/conductor/internal/controller/lease"
 	"github.com/simondxu/conductor/internal/controller/toolledger"
+	"github.com/simondxu/conductor/internal/executor"
 	"github.com/simondxu/conductor/internal/harness"
+	"github.com/simondxu/conductor/internal/telemetry"
 	"github.com/simondxu/conductor/proto"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/types/known/structpb"
 )
@@ -39,6 +50,17 @@ type Controller struct {
 	registry *Registry
 	eventLog eventlog.EventLog
 	ledger   toolledger.Ledger
+	lease    lease.Lease
+	ownerID  string
+	leaseTTL time.Duration
+	// unsafeBudget is toolTimeout + margin: the lease time a tool turn with
+	// an UNSAFE call needs left before it starts (I8). There is no tool
+	// timeout yet, so it is one renewal period.
+	unsafeBudget time.Duration
+	// snapshotEvery is how many events a replay reads after the latest
+	// snapshot before it saves a new one.
+	snapshotEvery int
+	active        sync.WaitGroup // Exec calls in progress
 }
 
 // Config configures the controller.
@@ -48,7 +70,23 @@ type Config struct {
 	// Ledger records tool calls of recovery:full harnesses. Nil disables it
 	// (SQLite, local use only).
 	Ledger toolledger.Ledger
+	// Lease, when set, makes every Exec own its conversation for its
+	// duration (ARCHITECTURE.md §5.1), so a client and the reconciler never
+	// drive the same run at once. Nil is process-local ownership (SQLite).
+	Lease lease.Lease
+	// OwnerID names this controller in the lease table.
+	OwnerID string
+	// LeaseTTL defaults to DefaultLeaseTTL.
+	LeaseTTL time.Duration
 }
+
+// defaultSnapshotEvery bounds replay: at most this many events, plus those
+// of the current turn, after the latest snapshot.
+const defaultSnapshotEvery = 100
+
+// DefaultLeaseTTL is the lease ttl; holders renew at a third of it
+// (ARCHITECTURE.md §10).
+const DefaultLeaseTTL = 30 * time.Second
 
 // New creates a new controller instance.
 func New(ctx context.Context, cfg Config) (*Controller, error) {
@@ -63,10 +101,26 @@ func New(ctx context.Context, cfg Config) (*Controller, error) {
 		return nil, fmt.Errorf("failed to create event log: %w", err)
 	}
 
+	if cfg.Lease != nil && cfg.OwnerID == "" {
+		return nil, fmt.Errorf("owner id is required with a lease")
+	}
+	ownerID := cfg.OwnerID
+	if ownerID == "" {
+		ownerID = "local" // process-local ownership (SQLite)
+	}
+	ttl := cfg.LeaseTTL
+	if ttl == 0 {
+		ttl = DefaultLeaseTTL
+	}
 	return &Controller{
-		registry: cfg.Registry,
-		eventLog: eventLog,
-		ledger:   cfg.Ledger,
+		registry:      cfg.Registry,
+		eventLog:      eventLog,
+		ledger:        cfg.Ledger,
+		lease:         cfg.Lease,
+		ownerID:       ownerID,
+		leaseTTL:      ttl,
+		unsafeBudget:  ttl / 3, // the renewal period
+		snapshotEvery: defaultSnapshotEvery,
 	}, nil
 }
 
@@ -74,10 +128,14 @@ func New(ctx context.Context, cfg Config) (*Controller, error) {
 // If id is empty, a UUID will be generated.
 // If the execution already exists, it will be resumed with optional new inputs.
 func (d *Controller) Exec(ctx context.Context, req *proto.CreateInteractionEvent, handler ExecHandler) (err error) {
-	runsActive.Inc()
+	d.active.Add(1)
+	defer d.active.Done()
+	ctx, span := tracer.Start(ctx, "exec", trace.WithAttributes(attribute.String("conversation_id", req.ConversationId)))
+	defer func() { endSpan(span, err) }()
+	runsActive.WithLabelValues(d.ownerID).Inc()
 	start := time.Now()
 	defer func() {
-		runsActive.Dec()
+		runsActive.WithLabelValues(d.ownerID).Dec()
 		outcome := runOutcome(err)
 		runsTotal.WithLabelValues(outcome).Inc()
 		runDuration.WithLabelValues(outcome).Observe(time.Since(start).Seconds())
@@ -89,16 +147,31 @@ func (d *Controller) exec(ctx context.Context, req *proto.CreateInteractionEvent
 	if req.ConversationId == "" {
 		return fmt.Errorf("conversation_id is required")
 	}
+	ctx = telemetry.WithLogAttrs(ctx, slog.String("conversation_id", req.ConversationId), slog.String("owner_id", d.ownerID))
+	ctx, held, release, err := d.own(ctx, req.ConversationId)
+	if err != nil {
+		return err
+	}
+	defer release()
+	gen := generation(held)
+	ctx = telemetry.WithLogAttrs(ctx, slog.Int64("generation", gen))
+	ctx = executor.WithGeneration(ctx, gen)
 
 	// TODO(jbd): Resume an incomplete execution if there exists one.
 	// TODO(jbd): Enable bringing a remote harness that implements HarnessService.
 	// TODO(anj): We need to consolidate agents and harness registration.
 	// Adding harness registration support temporarily.
 	l := newLogger(d.eventLog, req.ConversationId, req.AgentId)
-	state, storedHarnessID, history, err := l.ResumptionState(ctx)
+	l.gen = gen
+	st, read, err := d.replay(ctx, req.ConversationId)
 	if err != nil {
-		return fmt.Errorf("failed to check resumption state: %w", err)
+		return err
 	}
+	if len(req.Inputs) == 0 {
+		slog.InfoContext(ctx, "recovery.rebuild", slog.Int("events", read),
+			slog.Int("steps", len(st.History)), slog.String("state", st.State.String()))
+	}
+	state, storedHarnessID := st.State, st.HarnessID
 
 	// On resume, use the conversation's recorded harness. Using a different harness
 	// for the same conversation is not allowed.
@@ -122,7 +195,7 @@ func (d *Controller) exec(ctx context.Context, req *proto.CreateInteractionEvent
 	}
 
 	if d.registry.Recovery(harnessID) == RecoveryFull {
-		return d.execOwnedLoop(ctx, req, l, harnessID, h, state, history, handler)
+		return d.execOwnedLoop(ctx, req, l, held, harnessID, h, st, handler)
 	}
 
 	hhandler := &harnessHandler{
@@ -141,6 +214,7 @@ func (d *Controller) exec(ctx context.Context, req *proto.CreateInteractionEvent
 		defer exec.Close(ctx)
 
 		if err := exec.Run(ctx, hhandler); err != nil {
+			l.logFailure(ctx, err)
 			return fmt.Errorf("harness execution failed: %w", err)
 		}
 	}
@@ -164,8 +238,132 @@ func (d *Controller) exec(ctx context.Context, req *proto.CreateInteractionEvent
 		return fmt.Errorf("failed to log inputs: %w", err)
 	}
 	if err := exec.Run(ctx, hhandler); err != nil {
+		l.logFailure(ctx, err)
 		return fmt.Errorf("harness execution failed: %w", err)
 	}
+	return nil
+}
+
+// replay rebuilds the conversation's state from its latest snapshot and the
+// events after it, and returns how many events it read. When that tail
+// reaches snapshotEvery, it saves a new snapshot. A snapshot is only a
+// cache: one that cannot be read or saved costs a full replay, nothing
+// more.
+func (d *Controller) replay(ctx context.Context, conversationID string) (st runState, read int, err error) {
+	ctx, span := tracer.Start(ctx, "replay")
+	defer func() { endSpan(span, err) }()
+	var from int64
+	var events []*proto.StepEvent
+	snaps, _ := d.eventLog.(eventlog.Snapshots)
+	if snaps != nil {
+		step, folded, err := snaps.Snapshot(ctx, conversationID)
+		if err != nil {
+			slog.WarnContext(ctx, "Replaying the whole log: snapshot unreadable", slog.Any("error", err))
+		} else if folded != nil {
+			from, events = step, []*proto.StepEvent{folded}
+		}
+	}
+	tail, err := d.eventLog.EventsSince(ctx, conversationID, from)
+	if err != nil {
+		return st, 0, fmt.Errorf("failed to check resumption state: %w", err)
+	}
+	events = append(events, tail...)
+	replayEvents.Add(float64(len(tail)))
+	span.SetAttributes(attribute.Int("events", len(tail)), attribute.Int64("snapshot_step", from))
+	if st, err = rebuild(events); err != nil {
+		return st, 0, fmt.Errorf("failed to rebuild conversation %q: %w", conversationID, err)
+	}
+	if snaps != nil && len(tail) >= d.snapshotEvery {
+		if err := snaps.SaveSnapshot(ctx, conversationID, from+int64(len(tail)), fold(conversationID, events)); err != nil {
+			slog.WarnContext(ctx, "Snapshot not saved", slog.Any("error", err))
+		}
+	}
+	return st, len(tail), nil
+}
+
+// own takes the conversation's lease for the duration of one Exec and returns
+// a context that ends when the lease is lost, the lease, and the release to
+// defer. Without a lease it is a no-op and the lease is nil. lease.ErrHeld
+// means another controller or client is driving the conversation.
+func (d *Controller) own(ctx context.Context, conversationID string) (context.Context, lease.Held, func(), error) {
+	if d.lease == nil {
+		return ctx, nil, func() {}, nil
+	}
+	_, span := tracer.Start(ctx, "lease.acquire")
+	held, err := d.lease.Acquire(ctx, conversationID, d.ownerID, d.leaseTTL)
+	if err == nil {
+		span.SetAttributes(attribute.Int64("generation", held.Generation()))
+	}
+	endSpan(span, err)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	parent := ctx
+	ctx, cancel := context.WithCancel(ctx)
+	go func() {
+		select {
+		case <-held.Done(): // lost: stop executing (ARCHITECTURE.md §6.2)
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	go lease.KeepAlive(ctx, held, d.leaseTTL/3)
+	return ctx, held, func() {
+		cancel()
+		rctx := context.WithoutCancel(ctx)
+		if err := held.Release(rctx); err != nil {
+			if !errors.Is(err, lease.ErrLost) {
+				slog.WarnContext(ctx, "Failed to release the conversation lease", slog.Any("error", err))
+			}
+			return
+		}
+		// The caller went away (a drain, a client disconnect) mid-run: let
+		// another replica take the run over now.
+		if h, ok := d.lease.(handoverer); ok && parent.Err() != nil {
+			if err := h.Handover(rctx, conversationID); err != nil {
+				slog.WarnContext(ctx, "Failed to announce the handover", slog.Any("error", err))
+			}
+		}
+	}, nil
+}
+
+// handoverer is a Lease that can announce a run released unfinished
+// (lease.Postgres).
+type handoverer interface {
+	Handover(ctx context.Context, conversationID string) error
+	Handovers(ctx context.Context) <-chan struct{}
+}
+
+// generation is the fencing token of held, 0 without a lease.
+func generation(held lease.Held) int64 {
+	if held == nil {
+		return 0
+	}
+	return held.Generation()
+}
+
+// errLeaseMargin refuses a tool turn the lease may not outlast.
+var errLeaseMargin = errors.New("lease too close to expiry to start an UNSAFE tool call")
+
+// checkUnsafeBudget is I8 (correctness.md): a tool turn with an UNSAFE call
+// starts only while the lease has more than unsafeBudget left, renewing once
+// first if it does not. Otherwise its calls stay PLANNED and the run stays
+// PENDING, for recovery to run them under a fresh lease. Remaining is the
+// lease's local monotonic deadline, never a database timestamp.
+func (d *Controller) checkUnsafeBudget(ctx context.Context, held lease.Held, harnessID string, calls []*proto.ToolCallStep) error {
+	if held == nil || !slices.ContainsFunc(calls, func(c *proto.ToolCallStep) bool {
+		return d.registry.ToolClass(harnessID, c.GetFunctionCall().GetName()) == toolledger.Unsafe
+	}) {
+		return nil
+	}
+	if held.Remaining() <= d.unsafeBudget {
+		_ = held.Renew(ctx) // a failed renewal leaves Remaining as it was
+	}
+	if left := held.Remaining(); left <= d.unsafeBudget {
+		unsafeStarts.WithLabelValues("deferred").Inc()
+		return fmt.Errorf("%w: %s left, %s needed", errLeaseMargin, left.Round(time.Millisecond), d.unsafeBudget)
+	}
+	unsafeStarts.WithLabelValues("allowed").Inc()
 	return nil
 }
 
@@ -175,20 +373,30 @@ type harnessHandler struct {
 }
 
 func (a *harnessHandler) OnMessage(ctx context.Context, execID string, step *proto.Step) error {
+	if err := a.log(ctx, step); err != nil {
+		return err
+	}
+	return a.deliver(step)
+}
+
+// log appends step to the conversation log.
+func (a *harnessHandler) log(ctx context.Context, step *proto.Step) error {
 	// Log every response received from the harness
 	// TODO(anj): The harness should send the full input sent to get this particular response.
 	logStep, err := a.logger.LogOutputs(ctx, []*proto.Step{step}, proto.State_STATE_PENDING)
 	if err != nil {
-		slog.WarnContext(ctx, "Failed to log streamed message to event log",
-			slog.String("conversation_id", a.logger.conversationID),
-			slog.Any("error", err),
-		)
+		// I9: a step that is not durable is never delivered.
+		return fmt.Errorf("failed to log streamed step: %w", err)
 	}
 
 	if step != nil {
 		step.Index = logStep
 	}
+	return nil
+}
 
+// deliver sends a logged step to the client.
+func (a *harnessHandler) deliver(step *proto.Step) error {
 	if a.execHandler == nil {
 		return nil
 	}
@@ -200,13 +408,7 @@ func (a *harnessHandler) OnMessage(ctx context.Context, execID string, step *pro
 func (a *harnessHandler) OnComplete(ctx context.Context, execID string) error {
 	// Mark the execution turn as completed in the conversation log
 	if _, err := a.logger.LogOutputs(ctx, nil, proto.State_STATE_COMPLETED); err != nil {
-		slog.WarnContext(ctx, "Failed to mark completion state in event log",
-			slog.String("conversation_id", a.logger.conversationID),
-			slog.Any("error", err),
-		)
-	}
-	if a.execHandler == nil {
-		return nil
+		return fmt.Errorf("failed to log completion: %w", err)
 	}
 	return nil
 }
@@ -214,10 +416,6 @@ func (a *harnessHandler) OnComplete(ctx context.Context, execID string) error {
 // maxOwnedLoopTurns bounds the turns of one Exec on a recovery:full harness,
 // so a model that never stops calling tools cannot loop forever.
 const maxOwnedLoopTurns = 100
-
-// ownerGeneration is the generation every ledger write carries until
-// ownership leases land (M7).
-const ownerGeneration = 0
 
 // execOwnedLoop drives a recovery:full harness with the owned-loop turn
 // protocol (docs/conductor/ARCHITECTURE.md §1.4): every Run receives the whole
@@ -228,14 +426,43 @@ const ownerGeneration = 0
 // each call is recorded around its execution: PLANNED after the model turn
 // that requested it, STARTED before the tool turn that runs it, then settled
 // from its result, or OUTCOME_UNKNOWN when that turn ends without one.
-func (d *Controller) execOwnedLoop(ctx context.Context, req *proto.CreateInteractionEvent, l *logger, harnessID string, h harness.Harness, state proto.State, history []*proto.Step, handler ExecHandler) error {
-	if len(req.Inputs) == 0 && state != proto.State_STATE_PENDING {
+//
+// A resumed run continues from the history in the log, with the logged
+// agent_config unless the request brings one. Calls it left unanswered are
+// first resolved from the ledger by recoverCalls.
+func (d *Controller) execOwnedLoop(ctx context.Context, req *proto.CreateInteractionEvent, l *logger, held lease.Held, harnessID string, h harness.Harness, st runState, handler ExecHandler) error {
+	if len(req.Inputs) == 0 && st.State != proto.State_STATE_PENDING {
 		return nil
 	}
-	// Re-running a tool without the reconciler could repeat an UNSAFE effect,
-	// so an unanswered call is left for the reconciler (M4) instead.
+	gen := generation(held)
+	history := st.History
 	if calls := harness.UnansweredToolCalls(history); len(calls) > 0 {
-		return fmt.Errorf("conversation %q has %d unanswered tool call(s); resuming it needs the reconciler", req.ConversationId, len(calls))
+		// Without the ledger nothing says whether a call had its effect, and
+		// re-running it could repeat an UNSAFE one.
+		if d.ledger == nil {
+			return fmt.Errorf("conversation %q has %d unanswered tool call(s); resuming it needs the tool ledger (PostgreSQL)", req.ConversationId, len(calls))
+		}
+		if len(req.Inputs) > 0 {
+			return fmt.Errorf("conversation %q has an unfinished run; resume it before sending new input", req.ConversationId)
+		}
+	}
+	if d.ledger != nil && st.State == proto.State_STATE_PENDING {
+		failed, err := d.recoverCalls(ctx, gen, req.ConversationId, harnessID, history)
+		if err != nil {
+			return err
+		}
+		if len(failed) > 0 {
+			// The error results and FAILED go in one event, so the run cannot
+			// be left answered but still PENDING.
+			if _, err := l.LogOutputs(ctx, failed, proto.State_STATE_FAILED); err != nil {
+				return fmt.Errorf("failed to log the failed run: %w", err)
+			}
+			return errors.New("run failed: a tool call's outcome is unknown and it cannot be safely re-run")
+		}
+	}
+	agentConfig := req.AgentConfig
+	if len(agentConfig) == 0 {
+		agentConfig = st.AgentConfig
 	}
 
 	if len(req.Inputs) > 0 {
@@ -245,7 +472,7 @@ func (d *Controller) execOwnedLoop(ctx context.Context, req *proto.CreateInterac
 		history = append(history, req.Inputs...)
 	}
 
-	exec, err := h.Start(ctx, req.ConversationId, req.AgentConfig)
+	exec, err := h.Start(ctx, req.ConversationId, agentConfig)
 	if err != nil {
 		return fmt.Errorf("failed to start harness session: %w", err)
 	}
@@ -256,29 +483,8 @@ func (d *Controller) execOwnedLoop(ctx context.Context, req *proto.CreateInterac
 		if turn == maxOwnedLoopTurns {
 			return fmt.Errorf("harness did not finish within %d turns", maxOwnedLoopTurns)
 		}
-		th.base, th.emitted, th.planned = len(history), nil, nil
-		pending := harness.UnansweredToolCalls(history)
-		if err := d.startCalls(ctx, pending); err != nil {
+		if err := d.runTurn(ctx, held, harnessID, exec, th, history, turn); err != nil {
 			return err
-		}
-		if err := exec.Queue(ctx, history...); err != nil {
-			return fmt.Errorf("failed to queue history: %w", err)
-		}
-		runErr := exec.Run(ctx, th)
-		// Ledger writes after a failed turn must survive the cancellation that
-		// may have failed it.
-		lctx := context.WithoutCancel(ctx)
-		if err := d.planCalls(lctx, harnessID, th.planned); err != nil {
-			return err
-		}
-		if err := d.settleCalls(lctx, pending, th.emitted, runErr); err != nil {
-			return err
-		}
-		if runErr != nil {
-			return fmt.Errorf("harness execution failed: %w", runErr)
-		}
-		if len(th.emitted) == 0 {
-			return fmt.Errorf("harness turn %d produced no steps", turn)
 		}
 		history = append(history, th.emitted...)
 	}
@@ -288,14 +494,92 @@ func (d *Controller) execOwnedLoop(ctx context.Context, req *proto.CreateInterac
 	return nil
 }
 
-func (d *Controller) planCalls(ctx context.Context, harnessID string, calls []toolledger.PlannedCall) error {
+// runTurn runs one owned-loop turn: a tool turn when history ends in
+// unanswered calls, a model turn otherwise. Its span is harness.turn, with a
+// model.call child, or one tool.execute child per call that runs from the
+// call's start to its logged result.
+func (d *Controller) runTurn(ctx context.Context, held lease.Held, harnessID string, exec harness.Execution, th *turnHandler, history []*proto.Step, turn int) (err error) {
+	gen := generation(held)
+	th.base, th.emitted, th.planned = len(history), nil, nil
+	pending := harness.UnansweredToolCalls(history)
+	kind := "model"
+	if len(pending) > 0 {
+		kind = "tool"
+	}
+	ctx, span := tracer.Start(ctx, "harness.turn", trace.WithAttributes(
+		attribute.String("kind", kind), attribute.Int("turn", turn), attribute.String("harness", harnessID)))
+	defer func() { endSpan(span, err) }()
+	runCtx := ctx
+	if kind == "model" {
+		var model trace.Span
+		runCtx, model = tracer.Start(ctx, "model.call", trace.WithAttributes(attribute.String("harness", harnessID)))
+		defer func() { endSpan(model, err) }()
+	}
+	th.callSpans = map[string]trace.Span{}
+	for _, c := range pending {
+		_, s := tracer.Start(ctx, "tool.execute", trace.WithAttributes(
+			attribute.String("tool", c.GetFunctionCall().GetName()), attribute.String("call_id", c.GetId()),
+			attribute.String("class", string(d.registry.ToolClass(harnessID, c.GetFunctionCall().GetName())))))
+		th.callSpans[c.GetId()] = s
+	}
+	defer func() {
+		for _, s := range th.callSpans { // calls whose result never came
+			s.SetStatus(codes.Error, "no result")
+			s.End()
+		}
+	}()
+
+	if err := d.checkUnsafeBudget(ctx, held, harnessID, pending); err != nil {
+		return err
+	}
+	if err := d.startCalls(ctx, gen, pending); err != nil {
+		return err
+	}
+	for _, c := range pending {
+		chaos.At(ctx, chaos.ToolStarted, c.GetFunctionCall().GetName())
+	}
+	if err := exec.Queue(runCtx, history...); err != nil {
+		return fmt.Errorf("failed to queue history: %w", err)
+	}
+	if kind == "model" {
+		chaos.At(ctx, chaos.ModelStarted, "")
+	}
+	runErr := exec.Run(runCtx, th)
+	if kind == "model" {
+		chaos.At(ctx, chaos.ModelCompleted, "")
+	}
+	// Ledger writes after a failed turn must survive the cancellation that
+	// may have failed it.
+	lctx := context.WithoutCancel(ctx)
+	if err := d.planCalls(lctx, gen, harnessID, th.planned); err != nil {
+		return err
+	}
+	for _, p := range th.planned {
+		chaos.At(ctx, chaos.ToolPlanned, p.ToolName)
+	}
+	if err := d.settleCalls(lctx, gen, pending, th.emitted, runErr); err != nil {
+		return err
+	}
+	for _, c := range pending {
+		chaos.At(ctx, chaos.ToolSettled, c.GetFunctionCall().GetName())
+	}
+	if runErr != nil {
+		return fmt.Errorf("harness execution failed: %w", runErr)
+	}
+	if len(th.emitted) == 0 {
+		return fmt.Errorf("harness turn %d produced no steps", turn)
+	}
+	return nil
+}
+
+func (d *Controller) planCalls(ctx context.Context, gen int64, harnessID string, calls []toolledger.PlannedCall) error {
 	if d.ledger == nil || len(calls) == 0 {
 		return nil
 	}
 	for i := range calls {
 		calls[i].Class = d.registry.ToolClass(harnessID, calls[i].ToolName)
 	}
-	if err := d.ledger.Plan(ctx, ownerGeneration, calls...); err != nil {
+	if err := d.ledger.Plan(ctx, gen, calls...); err != nil {
 		return fmt.Errorf("failed to plan tool calls: %w", err)
 	}
 	return nil
@@ -305,14 +589,14 @@ func (d *Controller) planCalls(ctx context.Context, harnessID string, calls []to
 // start, the turn does not run, and the calls already started are marked
 // OUTCOME_UNKNOWN: there is no way back to PLANNED, and the ledger must not
 // claim more than it knows.
-func (d *Controller) startCalls(ctx context.Context, calls []*proto.ToolCallStep) error {
+func (d *Controller) startCalls(ctx context.Context, gen int64, calls []*proto.ToolCallStep) error {
 	if d.ledger == nil {
 		return nil
 	}
 	for i, c := range calls {
-		if err := d.ledger.Start(ctx, ownerGeneration, c.GetId()); err != nil {
+		if err := d.ledger.Start(ctx, gen, c.GetId()); err != nil {
 			for _, started := range calls[:i] {
-				_ = d.ledger.MarkUnknown(context.WithoutCancel(ctx), ownerGeneration, started.GetId(), "tool turn not run: "+err.Error())
+				_ = d.ledger.MarkUnknown(context.WithoutCancel(ctx), gen, started.GetId(), "tool turn not run: "+err.Error())
 			}
 			return fmt.Errorf("failed to start tool call %s: %w", c.GetId(), err)
 		}
@@ -322,7 +606,7 @@ func (d *Controller) startCalls(ctx context.Context, calls []*proto.ToolCallStep
 
 // settleCalls settles the calls of a tool turn from the results it emitted.
 // A call without a result may or may not have had its effect: OUTCOME_UNKNOWN.
-func (d *Controller) settleCalls(ctx context.Context, calls []*proto.ToolCallStep, emitted []*proto.Step, runErr error) error {
+func (d *Controller) settleCalls(ctx context.Context, gen int64, calls []*proto.ToolCallStep, emitted []*proto.Step, runErr error) error {
 	if d.ledger == nil || len(calls) == 0 {
 		return nil
 	}
@@ -339,7 +623,7 @@ func (d *Controller) settleCalls(ctx context.Context, calls []*proto.ToolCallSte
 			if runErr != nil {
 				reason = "tool turn failed: " + runErr.Error()
 			}
-			if err := d.ledger.MarkUnknown(ctx, ownerGeneration, c.GetId(), reason); err != nil {
+			if err := d.ledger.MarkUnknown(ctx, gen, c.GetId(), reason); err != nil {
 				return fmt.Errorf("failed to mark tool call %s unknown: %w", c.GetId(), err)
 			}
 			continue
@@ -352,7 +636,7 @@ func (d *Controller) settleCalls(ctx context.Context, calls []*proto.ToolCallSte
 		if r.GetFunctionResult().GetIsError() {
 			out.State = toolledger.Failed
 		}
-		if err := d.ledger.Settle(ctx, ownerGeneration, c.GetId(), out); err != nil {
+		if err := d.ledger.Settle(ctx, gen, c.GetId(), out); err != nil {
 			return fmt.Errorf("failed to settle tool call %s: %w", c.GetId(), err)
 		}
 	}
@@ -369,27 +653,39 @@ type turnHandler struct {
 	base           int // len(history) when the turn started
 	emitted        []*proto.Step
 	planned        []toolledger.PlannedCall
+	// callSpans are the tool.execute spans still open, by call_id.
+	callSpans map[string]trace.Span
 }
 
 func (t *turnHandler) OnMessage(ctx context.Context, execID string, step *proto.Step) error {
 	if call := step.GetToolCall(); call != nil {
-		fc := call.GetFunctionCall()
-		hash, canonical, err := toolledger.ArgsHash(fc.GetArguments())
+		p, err := plannedCall(t.conversationID, int64(t.base+len(t.emitted)), call)
 		if err != nil {
 			return err
 		}
-		pos := int64(t.base + len(t.emitted))
-		call.Id = toolledger.CallID(t.conversationID, pos, fc.GetName(), hash)
-		t.planned = append(t.planned, toolledger.PlannedCall{
-			CallID: call.Id, ConversationID: t.conversationID, Step: pos,
-			ToolName: fc.GetName(), ArgsHash: hash, Args: canonical,
-		})
+		call.Id = p.CallID
+		t.planned = append(t.planned, p)
 	}
+	if err := t.log(ctx, step); err != nil {
+		return err
+	}
+	// Only a logged step is part of the history; a result that never reached
+	// the log must not settle its call (I7b).
 	t.emitted = append(t.emitted, step)
-	return t.harnessHandler.OnMessage(ctx, execID, step)
+	if r := step.GetToolResult(); r != nil {
+		if s, ok := t.callSpans[r.GetCallId()]; ok {
+			s.End()
+			delete(t.callSpans, r.GetCallId())
+		}
+	}
+	return t.deliver(step)
 }
 
 func (t *turnHandler) OnComplete(ctx context.Context, execID string) error { return nil }
+
+// Wait blocks until every Exec in progress has returned, and so has released
+// its lease.
+func (d *Controller) Wait() { d.active.Wait() }
 
 // Registry returns the agent registry.
 func (d *Controller) Registry() *Registry {
@@ -409,6 +705,11 @@ func (d *Controller) Close() error {
 			return fmt.Errorf("failed to close tool ledger: %w", err)
 		}
 	}
+	if c, ok := d.lease.(io.Closer); ok {
+		if err := c.Close(); err != nil {
+			return fmt.Errorf("failed to close leases: %w", err)
+		}
+	}
 	return nil
 }
 
@@ -417,6 +718,8 @@ type logger struct {
 	interactionID  string
 	el             eventlog.EventLog
 	harnessID      string
+	// gen is the lease generation every append carries.
+	gen int64
 }
 
 func newLogger(
@@ -430,29 +733,6 @@ func newLogger(
 	}
 }
 
-// ResumptionState returns the conversation's current state, the harness it
-// used, and every step logged so far, in order.
-func (l *logger) ResumptionState(ctx context.Context) (proto.State, string, []*proto.Step, error) {
-	events, err := l.el.Events(ctx, l.conversationID)
-	if err != nil {
-		return proto.State_STATE_UNSPECIFIED, "", nil, err
-	}
-
-	var state proto.State
-	var harnessID string
-	var steps []*proto.Step
-	for _, ev := range events {
-		if harnessID == "" && ev.AgentId != "" {
-			harnessID = ev.AgentId
-		}
-		if ev.State != proto.State_STATE_UNSPECIFIED {
-			state = ev.State
-		}
-		steps = append(steps, ev.Steps...)
-	}
-	return state, harnessID, steps, nil
-}
-
 func (l *logger) LogInputs(ctx context.Context, steps []*proto.Step, agentConfig []byte) (int64, error) {
 	// Parse the agent config into a human-readable struct for logging.
 	var cfg *structpb.Struct
@@ -460,7 +740,6 @@ func (l *logger) LogInputs(ctx context.Context, steps []*proto.Step, agentConfig
 		cfg = &structpb.Struct{}
 		if err := protojson.Unmarshal(agentConfig, cfg); err != nil {
 			slog.WarnContext(ctx, "Failed to parse agent config for logging",
-				slog.String("conversation_id", l.conversationID),
 				slog.Any("error", err),
 			)
 			cfg = nil
@@ -474,7 +753,7 @@ func (l *logger) LogInputs(ctx context.Context, steps []*proto.Step, agentConfig
 		Steps:          steps,
 		State:          proto.State_STATE_PENDING,
 	}
-	return l.el.Append(ctx, ev)
+	return l.append(ctx, ev)
 }
 
 func (l *logger) LogOutputs(ctx context.Context, steps []*proto.Step, state proto.State) (int64, error) {
@@ -484,5 +763,48 @@ func (l *logger) LogOutputs(ctx context.Context, steps []*proto.Step, state prot
 		Steps:          steps,
 		State:          state,
 	}
-	return l.el.Append(ctx, ev)
+	return l.append(ctx, ev)
+}
+
+// appendAttempts bounds how often one event's append is tried. Retrying is
+// safe because every attempt carries the same event_id (I10).
+const appendAttempts = 3
+
+// append gives ev an event_id and appends it, retrying transient failures.
+func (l *logger) append(ctx context.Context, ev *proto.StepEvent) (int64, error) {
+	ev.EventId = uuid.NewString()
+	var err error
+	for attempt := range appendAttempts {
+		var step int64
+		if step, err = l.el.Append(ctx, ev, l.gen); err == nil {
+			chaos.At(ctx, chaos.EventAppended, "")
+			return step, nil
+		}
+		// A fenced write fails the same way every time: ownership is gone.
+		if attempt == appendAttempts-1 || errors.Is(err, lease.ErrFenced) {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return 0, err
+		case <-time.After(time.Duration(50<<attempt) * time.Millisecond):
+		}
+	}
+	return 0, err
+}
+
+// logFailure records the end of a failed turn, so the conversation is not left
+// PENDING forever (docs/conductor/streaming-path.md §5.1): CANCELED when the
+// caller went away, FAILED otherwise. Best effort: if it cannot be written,
+// the conversation stays PENDING, as before.
+func (l *logger) logFailure(ctx context.Context, runErr error) {
+	state := proto.State_STATE_FAILED
+	if errors.Is(runErr, context.Canceled) || ctx.Err() != nil {
+		state = proto.State_STATE_CANCELED
+	}
+	if _, err := l.LogOutputs(context.WithoutCancel(ctx), nil, state); err != nil {
+		slog.WarnContext(ctx, "Failed to record the failed turn",
+			slog.Any("error", err),
+		)
+	}
 }
