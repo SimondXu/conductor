@@ -84,14 +84,15 @@ effects_of() { echo "SELECT count(*) FROM fake_effects e JOIN tool_calls t USING
 # Harness crash (M4): the fake harness dies after charge_card's effect and
 # before its result, and the client exits non-zero. With no client, the
 # reconciler runs the IDEMPOTENT call again under the same key and completes
-# the run with the logged agent_config.
+# the run with the logged agent_config. A reconciler pass that beats the
+# harness restart is one more attempt with no effect, so attempts is >= 2.
 crash="crash-$(date +%s)"
 cfg='{"turns":[{"tool_calls":[{"name":"charge_card","args":{"amount":4200}}]},{"content":"Charged."}],"tools":{"charge_card":{"idempotent":true,"crash_after_effect":true}}}'
 if dc exec -T conductor conductor run --server localhost:8494 --conversation "$crash" --agent-config "$cfg" --input "charge me"; then
   fail "the crashing run succeeded"
 fi
 until_eq 60 "$(last_state "$crash")" "STATE_COMPLETED"
-[[ "$(psql "$(call_of "$crash")")" == "SUCCEEDED 2" ]] || fail "$crash call is '$(psql "$(call_of "$crash")")', want 'SUCCEEDED 2'"
+[[ "$(psql "$(call_of "$crash")")" =~ ^SUCCEEDED\ ([2-9]|[1-9][0-9]+)$ ]] || fail "$crash call is '$(psql "$(call_of "$crash")")', want SUCCEEDED after 2 or more attempts"
 [[ "$(psql "$(effects_of "$crash")")" == "1" ]] || fail "$crash has $(psql "$(effects_of "$crash")") effects, want 1"
 
 # Holder killed mid-tool-call (M4 and M7 DoD): SIGKILL the replica that
