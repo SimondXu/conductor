@@ -67,21 +67,43 @@ until_eq 60 "$(last_state "$crash")" "STATE_COMPLETED"
 [[ "$(psql "$(call_of "$crash")")" == "SUCCEEDED 2" ]] || fail "$crash call is '$(psql "$(call_of "$crash")")', want 'SUCCEEDED 2'"
 [[ "$(psql "$(effects_of "$crash")")" == "1" ]] || fail "$crash has $(psql "$(effects_of "$crash")") effects, want 1"
 
-# Controller killed mid-tool-call (M4 DoD): SIGKILL the controller while the
-# call is STARTED, then start it again. With no client attached, the new
-# process takes the run over once the dead one's lease expires and completes
-# it at a higher generation.
+# Holder killed mid-tool-call (M4 and M7 DoD): SIGKILL the replica that
+# owns the run while the call is STARTED, and do not restart it. With no client
+# attached, another replica takes the run over once the dead lease expires and
+# completes it at a higher generation.
 killed="killed-$(date +%s)"
 cfg='{"turns":[{"tool_calls":[{"name":"charge_card","args":{"amount":4200}}]},{"content":"Charged."}],"tools":{"charge_card":{"idempotent":true,"delay_ms":5000}}}'
 dc exec -d -T fake-harness conductor run --server conductor:8494 --conversation "$killed" --agent-config "$cfg" --input "charge me"
 until_eq 30 "SELECT state FROM tool_calls WHERE conversation_id = '$killed'" "STARTED"
 dc kill -s SIGKILL conductor
-dc start conductor
 until_eq 90 "$(last_state "$killed")" "STATE_COMPLETED"
 [[ "$(psql "$(call_of "$killed")")" == "SUCCEEDED 2" ]] || fail "$killed call is '$(psql "$(call_of "$killed")")', want 'SUCCEEDED 2'"
 [[ "$(psql "$(effects_of "$killed")")" == "1" ]] || fail "$killed has $(psql "$(effects_of "$killed")") effects, want 1"
 gen=$(psql "SELECT generation FROM tool_calls WHERE conversation_id = '$killed'")
 (( gen > 1 )) || fail "$killed call settled at generation $gen, want > 1"
+dc start conductor
+dc up -d --wait conductor
+
+# Rolling update (M7 DoD): SIGTERM the owner mid-tool-call. After its 2s drain
+# it cancels the run and releases the lease, so another replica takes over at
+# once, without waiting out the lease, and the run ends exactly once.
+rolled="rolled-$(date +%s)"
+cfg='{"turns":[{"tool_calls":[{"name":"charge_card","args":{"amount":4200}}]},{"content":"Charged."}],"tools":{"charge_card":{"idempotent":true,"delay_ms":10000}}}'
+dc exec -d -T fake-harness conductor run --server conductor:8494 --conversation "$rolled" --agent-config "$cfg" --input "charge me"
+until_eq 30 "SELECT state FROM tool_calls WHERE conversation_id = '$rolled'" "STARTED"
+dc stop -t 30 conductor
+until_eq 60 "$(last_state "$rolled")" "STATE_COMPLETED"
+dc logs conductor-2 conductor-3 | grep '"recovery.start"' | grep "\"$rolled\"" | grep -q '"kill_kind":"graceful"' \
+  || fail "$rolled was not taken over after a graceful release"
+[[ "$(psql "$(effects_of "$rolled")")" == "1" ]] || fail "$rolled has $(psql "$(effects_of "$rolled")") effects, want 1"
+dc start conductor
+dc up -d --wait conductor
+
+for c in "$crash" "$killed" "$rolled"; do
+  n=$(psql "SELECT count(*) FROM conversation_log WHERE conversation_id = '$c'
+              AND payload::jsonb->>'state' IN ('STATE_COMPLETED', 'STATE_FAILED', 'STATE_CANCELED')")
+  [[ "$n" == "1" ]] || fail "$c has $n terminal events, want 1"
+done
 
 # Falsifying queries from docs/conductor/correctness.md; each must be empty.
 check() {
@@ -91,6 +113,11 @@ check() {
 }
 check I1 "SELECT call_id FROM tool_calls WHERE state IN ('STARTED', 'OUTCOME_UNKNOWN') AND reconcile_deadline < now()"
 check I2 "SELECT e.idempotency_key FROM fake_effects e JOIN tool_calls t USING (call_id) WHERE t.class = 'IDEMPOTENT' GROUP BY e.idempotency_key HAVING count(*) > 1"
+check I1b "SELECT r.conversation_id FROM runs r JOIN tool_calls t USING (conversation_id)
+  WHERE r.state = 'COMPLETED' AND t.state IN ('STARTED', 'OUTCOME_UNKNOWN')"
+check "I3'" "SELECT conversation_id FROM (SELECT conversation_id, generation,
+  lag(generation) OVER (PARTITION BY conversation_id ORDER BY step) AS prev
+  FROM conversation_log WHERE generation IS NOT NULL) s WHERE prev IS NOT NULL AND generation < prev"
 check I7b "SELECT t.call_id FROM tool_calls t WHERE t.state = 'SUCCEEDED' AND NOT EXISTS (
   SELECT 1 FROM conversation_log l WHERE l.conversation_id = t.conversation_id
      AND l.payload::jsonb @> jsonb_build_object('steps', jsonb_build_array(
@@ -120,4 +147,4 @@ up=$(dc exec -T prometheus wget -qO- 'http://localhost:9090/api/v1/query?query=u
   | sed -n 's/.*"value":\[[^,]*,"\([0-9]\)"\].*/\1/p')
 [[ "$up" == "1" ]] || fail "Prometheus is not scraping the fake harness"
 
-echo "PASS: $conv completed with $steps log rows and $settled settled calls; $crash (harness crash) and $killed (controller SIGKILL) recovered by the reconciler with one effect over two attempts; I1, I2, I7b hold; Prometheus sees $runs completed run(s)"
+echo "PASS: $conv completed with $steps log rows and $settled settled calls; $crash (harness crash), $killed (owner SIGKILLed) and $rolled (owner SIGTERMed) finished once by another replica with one effect each; I1, I1b, I2, I3', I7b hold; Prometheus sees $runs completed run(s)"

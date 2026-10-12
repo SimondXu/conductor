@@ -33,7 +33,7 @@ import (
 var migrations embed.FS
 
 // SchemaVersion is the migration version this binary requires.
-const SchemaVersion = 5
+const SchemaVersion = 6
 
 // Up applies every pending migration and returns the resulting version.
 func Up(dsn string) (uint, error) {

@@ -28,7 +28,7 @@ type MemoryEventLog struct {
 	AllEvents     []*proto.StepEvent
 }
 
-func (m *MemoryEventLog) Append(_ context.Context, event *proto.StepEvent) (int64, error) {
+func (m *MemoryEventLog) Append(_ context.Context, event *proto.StepEvent, _ int64) (int64, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 

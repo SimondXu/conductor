@@ -46,11 +46,11 @@ func testEventLog(t *testing.T, newLog func(t *testing.T) EventLog) {
 		// 1. Conversation log.
 		cev1 := &proto.StepEvent{ConversationId: conv, InteractionId: task1}
 		cev2 := &proto.StepEvent{ConversationId: conv, InteractionId: task2}
-		s1, err := log.Append(ctx, cev1)
+		s1, err := log.Append(ctx, cev1, 0)
 		if err != nil {
 			t.Fatalf("failed to append cev1: %v", err)
 		}
-		s2, err := log.Append(ctx, cev2)
+		s2, err := log.Append(ctx, cev2, 0)
 		if err != nil {
 			t.Fatalf("failed to append cev2: %v", err)
 		}
@@ -79,18 +79,18 @@ func testEventLog(t *testing.T, newLog func(t *testing.T) EventLog) {
 		conv := t.Name() + "-" + uuid.NewString()
 
 		ev := &proto.StepEvent{ConversationId: conv, EventId: uuid.NewString(), Steps: []*proto.Step{{Description: "x"}}}
-		first, err := log.Append(ctx, ev)
+		first, err := log.Append(ctx, ev, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
-		retry, err := log.Append(ctx, gproto.Clone(ev).(*proto.StepEvent))
+		retry, err := log.Append(ctx, gproto.Clone(ev).(*proto.StepEvent), 0)
 		if err != nil {
 			t.Fatalf("retry: %v", err)
 		}
 		if retry != first {
 			t.Errorf("retry returned step %d, want %d", retry, first)
 		}
-		next, err := log.Append(ctx, &proto.StepEvent{ConversationId: conv, EventId: uuid.NewString()})
+		next, err := log.Append(ctx, &proto.StepEvent{ConversationId: conv, EventId: uuid.NewString()}, 0)
 		if err != nil || next != first+1 {
 			t.Errorf("next append = %d, %v; want %d", next, err, first+1)
 		}
@@ -123,7 +123,7 @@ func testEventLog(t *testing.T, newLog func(t *testing.T) EventLog) {
 
 		const n = 3
 		for i := int64(1); i <= n; i++ {
-			step, err := log.Append(ctx, &proto.StepEvent{ConversationId: conv, InteractionId: "t"})
+			step, err := log.Append(ctx, &proto.StepEvent{ConversationId: conv, InteractionId: "t"}, 0)
 			if err != nil {
 				t.Fatalf("auto-step append failed: %v", err)
 			}
@@ -213,11 +213,11 @@ func TestSQLiteEventLog_UpgradesOldSchema(t *testing.T) {
 	}
 	defer log.Close()
 	ev := &proto.StepEvent{ConversationId: "c", EventId: uuid.NewString()}
-	a, err := log.Append(context.Background(), ev)
+	a, err := log.Append(context.Background(), ev, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if b, err := log.Append(context.Background(), ev); err != nil || b != a {
+	if b, err := log.Append(context.Background(), ev, 0); err != nil || b != a {
 		t.Fatalf("retry = %d, %v; want %d", b, err, a)
 	}
 }

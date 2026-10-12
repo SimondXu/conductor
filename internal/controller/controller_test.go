@@ -355,7 +355,7 @@ func TestController2_ExecResumptionFlow(t *testing.T) {
 			AgentId:        "test-agent",
 			State:          proto.State_STATE_PENDING,
 			Steps:          []*proto.Step{harnesstest.UserStep("Initial")},
-		})
+		}, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -419,7 +419,7 @@ func TestController2_ExecResumptionFlow(t *testing.T) {
 			AgentId:        "test-agent",
 			State:          proto.State_STATE_PENDING,
 			Steps:          []*proto.Step{harnesstest.UserStep("Initial")},
-		})
+		}, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -710,7 +710,7 @@ func TestOwnedLoop_RefusesUnansweredToolCallWithoutLedger(t *testing.T) {
 	if _, err := log.Append(ctx, &proto.StepEvent{
 		ConversationId: "crashed", AgentId: "fake", State: proto.State_STATE_PENDING,
 		Steps: []*proto.Step{harnesstest.UserStep("go"), call},
-	}); err != nil {
+	}, 0); err != nil {
 		t.Fatal(err)
 	}
 	c := newOwnedLoopController(t, log, effects)
@@ -754,12 +754,12 @@ type flakyLog struct {
 	fail  func(call int) bool
 }
 
-func (f *flakyLog) Append(ctx context.Context, ev *proto.StepEvent) (int64, error) {
+func (f *flakyLog) Append(ctx context.Context, ev *proto.StepEvent, gen int64) (int64, error) {
 	f.calls++
 	if f.fail(f.calls) {
 		return 0, errors.New("injected append failure")
 	}
-	return f.MemoryEventLog.Append(ctx, ev)
+	return f.MemoryEventLog.Append(ctx, ev, gen)
 }
 
 func newFlakyController(t *testing.T, log eventlog.EventLog, h harness.Harness) *Controller {

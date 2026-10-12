@@ -29,8 +29,8 @@ import (
 type RunIndex interface {
 	// RecoveryCandidates returns conversations of the given harnesses to
 	// recover, from two sources: PENDING runs, and conversations with a tool
-	// call in STARTED or OUTCOME_UNKNOWN, which catches a runs row that is
-	// stale, wrong or missing. Conversations whose backoff has not elapsed,
+	// call in STARTED or OUTCOME_UNKNOWN, which catches a runs row whose
+	// state is stale or wrong. Conversations whose backoff has not elapsed,
 	// or whose lease has not expired, are left out.
 	RecoveryCandidates(ctx context.Context, harnessIDs []string, limit int) ([]Candidate, error)
 	// BumpRecoveryAttempt counts one recovery attempt and pushes the next
@@ -42,7 +42,7 @@ type RunIndex interface {
 // Candidate is a conversation the reconciler may recover.
 type Candidate struct {
 	ConversationID string
-	// AgentID is the run's harness, empty when it has no runs row.
+	// AgentID is the run's harness.
 	AgentID string
 	// Idle is how long the run had gone without an append when it was found,
 	// by the database clock.
@@ -79,7 +79,7 @@ func projectRun(ctx context.Context, tx *sql.Tx, ev *proto.StepEvent, step int64
 func (p *Postgres) RecoveryCandidates(ctx context.Context, harnessIDs []string, limit int) ([]Candidate, error) {
 	rows, err := p.db.QueryContext(ctx, `
 		SELECT c.conversation_id, COALESCE(r.agent_id, ''),
-		       COALESCE(EXTRACT(EPOCH FROM now() - r.updated_at), 0)::float8,
+		       EXTRACT(EPOCH FROM now() - r.updated_at)::float8,
 		       CASE WHEN l.conversation_id IS NULL THEN 'none'
 		            WHEN l.owner_id IS NULL THEN 'graceful'
 		            ELSE 'ungraceful' END
@@ -87,13 +87,14 @@ func (p *Postgres) RecoveryCandidates(ctx context.Context, harnessIDs []string, 
 		        UNION
 		        SELECT conversation_id FROM tool_calls
 		         WHERE state IN ('STARTED', 'OUTCOME_UNKNOWN')) c
-		  LEFT JOIN runs r USING (conversation_id)
+		  -- runs is written with the log, so a call with no runs row has no
+		  -- log to recover from.
+		  JOIN runs r USING (conversation_id)
 		  LEFT JOIN conversation_leases l USING (conversation_id)
-		 WHERE (r.agent_id = ANY($1) OR r.conversation_id IS NULL)
+		 WHERE r.agent_id = ANY($1)
 		   AND (r.next_attempt_at IS NULL OR r.next_attempt_at <= now())
 		   AND (l.expires_at IS NULL OR l.expires_at <= now())
-		 -- A call with no runs row has nothing to back off on: try it last.
-		 ORDER BY r.conversation_id IS NULL, r.next_attempt_at NULLS FIRST
+		 ORDER BY r.next_attempt_at NULLS FIRST
 		 LIMIT $2`, harnessIDs, limit)
 	if err != nil {
 		return nil, fmt.Errorf("eventlog: recovery candidates: %w", err)

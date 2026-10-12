@@ -19,12 +19,14 @@ import (
 	"errors"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"google.golang.org/protobuf/types/known/structpb"
 
 	schema "github.com/simondxu/conductor/db"
+	"github.com/simondxu/conductor/internal/controller/lease"
 )
 
 // openTestLedger returns a ledger on PG_TEST_DSN, skipping when it is unset.
@@ -42,8 +44,10 @@ func openTestLedger(t *testing.T) *Postgres {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { l.Close() })
-	if _, err := l.db.Exec("DELETE FROM tool_calls WHERE conversation_id = $1", t.Name()); err != nil {
-		t.Fatal(err)
+	for _, table := range []string{"tool_calls", "conversation_leases"} {
+		if _, err := l.db.Exec("DELETE FROM "+table+" WHERE conversation_id = $1", t.Name()); err != nil {
+			t.Fatal(err)
+		}
 	}
 	return l
 }
@@ -169,6 +173,48 @@ func TestExpireDeadlines(t *testing.T) {
 	}
 	if calls[0].State != Abandoned || calls[0].Error != DeadlineExceeded || calls[1].State != Started {
 		t.Fatalf("calls = %s %q, %s; want ABANDONED %q, STARTED", calls[0].State, calls[0].Error, calls[1].State, DeadlineExceeded)
+	}
+}
+
+// I4 for the ledger: once another owner holds the conversation, the old
+// owner's transitions are rejected and the row is untouched.
+func TestFencedTransitionsRejectStaleGeneration(t *testing.T) {
+	l := openTestLedger(t)
+	ctx := context.Background()
+	id := plan(t, l, 1) // generation 0: never leased
+	leases, err := lease.OpenPostgres(os.Getenv("PG_TEST_DSN"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { leases.Close() })
+	a, err := leases.Acquire(ctx, t.Name(), "a", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := l.Start(ctx, 0, id); !errors.Is(err, lease.ErrFenced) {
+		t.Fatalf("start at generation 0 on a leased conversation: err = %v, want ErrFenced", err)
+	}
+	if err := l.Start(ctx, a.Generation(), id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := l.db.Exec("UPDATE conversation_leases SET expires_at = now() WHERE conversation_id = $1", t.Name()); err != nil {
+		t.Fatal(err)
+	}
+	b, err := leases.Acquire(ctx, t.Name(), "b", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := l.Settle(ctx, a.Generation(), id, Outcome{State: Succeeded, Result: []byte(`{}`)}); !errors.Is(err, lease.ErrFenced) {
+		t.Fatalf("stale settle: err = %v, want ErrFenced", err)
+	}
+	if err := l.Plan(ctx, a.Generation(), PlannedCall{CallID: id + "x", ConversationID: t.Name(), Step: 2, ToolName: "t", Args: []byte("{}"), Class: Unsafe}); !errors.Is(err, lease.ErrFenced) {
+		t.Fatalf("stale plan: err = %v, want ErrFenced", err)
+	}
+	if c := only(t, l); c.State != Started || c.Generation != a.Generation() {
+		t.Fatalf("after stale writes: %s at generation %d, want STARTED at %d", c.State, c.Generation, a.Generation())
+	}
+	if err := l.MarkUnknown(ctx, b.Generation(), id, "owner lost"); err != nil {
+		t.Fatalf("new owner: %v", err)
 	}
 }
 
