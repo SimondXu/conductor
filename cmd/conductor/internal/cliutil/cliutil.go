@@ -31,6 +31,7 @@ import (
 	"github.com/simondxu/conductor/internal/harness/antigravity"
 	"github.com/simondxu/conductor/internal/harness/antigravityinteractions"
 	"github.com/simondxu/conductor/internal/harness/fake"
+	"github.com/simondxu/conductor/internal/harness/openaicompat"
 	"github.com/simondxu/conductor/internal/harness/remote"
 	"github.com/simondxu/conductor/internal/harness/substrate"
 	"github.com/simondxu/conductor/internal/skills"
@@ -210,6 +211,27 @@ func NewControllerFromConfig(ctx context.Context, cfg *Config) (*controller.Cont
 	reg.DeclareTools(config.FakeHarnessID, fakeTools)
 	if cfg.Registry.Fake.Default {
 		defaultHarnessID = config.FakeHarnessID
+	}
+
+	// OpenAI-compatible harness: a real model, recovery:full.
+	if oc := cfg.Registry.OpenAICompat; oc.BaseURL != "" {
+		h, err := openaicompat.New(oc.Config)
+		if err != nil {
+			return nil, err
+		}
+		if err := reg.Register(config.OpenAICompatHarnessID, h, controller.RecoveryFull); err != nil {
+			return nil, fmt.Errorf("register openai-compat harness: %w", err)
+		}
+		tools := map[string]toolledger.Class{}
+		for _, t := range oc.Tools {
+			if tools[t.Name], err = toolledger.ParseClass(t.Class); err != nil {
+				return nil, fmt.Errorf("openai-compat harness tool %q: %w", t.Name, err)
+			}
+		}
+		reg.DeclareTools(config.OpenAICompatHarnessID, tools)
+		if oc.Default {
+			defaultHarnessID = config.OpenAICompatHarnessID
+		}
 	}
 
 	for _, sc := range cfg.Registry.Substrate {

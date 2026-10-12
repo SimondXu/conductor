@@ -143,8 +143,12 @@ registry:
     tools:
       - name: http_get
         class: IDEMPOTENT
+        description: Fetch a URL and return its body.
+        parameters: {type: object, properties: {url: {type: string}}, required: [url]}
+        url: http://tools:8080/http_get
       - name: send_email
         class: UNSAFE
+        url: http://tools:8080/send_email
 ```
 
 ```
@@ -233,12 +237,27 @@ Complete set of knobs. Anything not listed does not exist.
 | `base_url` | yes | OpenAI-compatible base, including `/v1` |
 | `model` | yes | Model id as the endpoint names it |
 | `api_key_env` | no | **Name of an environment variable** holding the key. Conductor never takes a key inline in config and never logs it. Unset means no `Authorization` header. |
-| `request_timeout` | no | Per-request timeout. Default `<120s>`. |
-| `max_turns` | no | Hard cap on model↔tool round trips per run. Default `<24>`. |
-| `tool_choice` | no | Passed through: `auto` \| `none` \| `required`. Default `auto`. |
-| `extra_headers` | no | Map of header name to env-var name, for gateways that need routing headers. |
+| `request_timeout` | no | Per-request timeout, for model and tool requests alike. Default `120s`. |
+| `max_turns` | no | Hard cap on model turns since the last user input, counted from the history. Default `24`. |
+| `tool_choice` | no | Passed through: `auto` \| `none` \| `required`. Default `auto`. Sent only when tools are declared. |
+| `extra_headers` | no | Map of header name to env-var name, for gateways that need routing headers. Sent to the model endpoint only. |
 | `tools[].name` | yes per tool | Tool name sent in the request. |
 | `tools[].class` | yes per tool | `IDEMPOTENT` \| `RECONCILABLE` \| `UNSAFE`. Declared, never inferred. Determines recovery policy (§6.3). |
+| `tools[].description` | no | Tool description sent to the model. |
+| `tools[].parameters` | no | JSON schema of the tool's arguments, sent to the model. |
+| `tools[].url` | yes per tool | The tool's HTTP endpoint (see below). |
+
+**Why each tool has a `url`.** Under the owned loop (`ARCHITECTURE.md` §1.4)
+the harness executes tool calls, so every declared tool needs an
+implementation somewhere. Conductor ships no built-in tools and does not embed
+an MCP client, so the implementation is one HTTP endpoint per tool. A tool
+turn `POST`s the call's arguments as a JSON object to `url` with the header
+`Idempotency-Key: <call_id>`, and the JSON response body becomes the tool
+result. A non-2xx response or a failed request becomes a result with
+`is_error` set, which the model sees on its next turn; arguments that are not
+a JSON object, or a call to an undeclared tool, are answered the same way
+without calling any endpoint. Honouring `Idempotency-Key` is the endpoint's
+job; it is what makes an `IDEMPOTENT` declaration true.
 
 There is no fallback chain, no routing, no retry-across-providers, and no cost
 model. One harness instance points at one endpoint.
@@ -256,6 +275,13 @@ model. One harness instance points at one endpoint.
   args_hash))[:32]`, computed by Conductor from durable inputs. Provider ids are
   recorded for correlation only. This is why a provider that changes its ids
   between retries does not break idempotency.
+- **A tool request that fails in transit is reported as an error, not as
+  unknown.** If the request to `tools[].url` times out or the connection
+  drops, the result is `is_error` and the ledger settles the call `FAILED`,
+  although the endpoint may have acted. If the model then calls the tool
+  again, that is a new call with a new `call_id`, so the endpoint's
+  idempotency key does not catch it. Only cancellation of the run itself
+  leaves the call `OUTCOME_UNKNOWN`.
 - **Token and cost metrics are absent for most local models.**
   `conductor_model_tokens_total` is emitted only when the endpoint returns a
   `usage` block. Local runtimes often do not. The metric is simply not recorded
