@@ -457,3 +457,74 @@ func (c crashOnResult) OnMessage(ctx context.Context, id string, s *proto.Step) 
 	runtime.Goexit()
 	return nil
 }
+
+// midTurnCrash ends the calling goroutine once the first step of a model turn
+// has been handed to the controller, until recovered is set: like a process
+// dying between two steps of one turn.
+type midTurnCrash struct {
+	harness.Harness
+	recovered *atomic.Bool
+}
+
+func (c midTurnCrash) Start(ctx context.Context, conv string, cfg []byte) (harness.Execution, error) {
+	e, err := c.Harness.Start(ctx, conv, cfg)
+	return midTurnExecution{e, c.recovered}, err
+}
+
+type midTurnExecution struct {
+	harness.Execution
+	recovered *atomic.Bool
+}
+
+func (e midTurnExecution) Run(ctx context.Context, h harness.Handler) error {
+	return e.Execution.Run(ctx, crashAfterThought{h, e.recovered})
+}
+
+type crashAfterThought struct {
+	harness.Handler
+	recovered *atomic.Bool
+}
+
+func (c crashAfterThought) OnMessage(ctx context.Context, id string, s *proto.Step) error {
+	err := c.Handler.OnMessage(ctx, id, s)
+	if s.GetThought() != nil && !c.recovered.Load() {
+		runtime.Goexit()
+	}
+	return err
+}
+
+// I11: the owner dies after the first step of a model turn reached the
+// controller. None of the turn is in the log, so a resume runs the turn again
+// instead of taking a fragment of it for the model's answer.
+func TestRecover_CrashMidModelTurnRerunsTheTurn(t *testing.T) {
+	var recovered atomic.Bool
+	r := newLedgerRig(t, func(h harness.Harness) harness.Harness { return midTurnCrash{h, &recovered} })
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = r.exec(`{"turns":[{"thought":"plan","content":"Charging.","tool_calls":[{"name":"charge_card"}]},{"content":"done"}],"tools":{"charge_card":{"idempotent":true}}}`)
+	}()
+	<-done
+	events, _ := r.log.Events(context.Background(), r.conv)
+	var logged int
+	for _, ev := range events {
+		logged += len(ev.Steps)
+	}
+	if logged != 1 {
+		t.Fatalf("after the crash the log has %d steps, want only the user input", logged)
+	}
+
+	recovered.Store(true)
+	if err := r.resume(); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	r.wantState(t, proto.State_STATE_COMPLETED)
+	calls, results := r.loggedSteps(t)
+	if len(calls) != 1 || len(results) != 1 || len(r.effects.Effects) != 1 {
+		t.Fatalf("calls %d, results %d, effects %d; want 1 each", len(calls), len(results), len(r.effects.Effects))
+	}
+	st := rebuilt(t, r.log, r.conv)
+	if last := st.History[len(st.History)-1]; last.GetContent().GetContent()[0].GetText().GetText() != "done" {
+		t.Fatalf("last step = %v, want the final answer", last)
+	}
+}

@@ -500,12 +500,12 @@ func (d *Controller) execOwnedLoop(ctx context.Context, req *proto.CreateInterac
 // call's start to its logged result.
 func (d *Controller) runTurn(ctx context.Context, held lease.Held, harnessID string, exec harness.Execution, th *turnHandler, history []*proto.Step, turn int) (err error) {
 	gen := generation(held)
-	th.base, th.emitted, th.planned = len(history), nil, nil
 	pending := harness.UnansweredToolCalls(history)
 	kind := "model"
 	if len(pending) > 0 {
 		kind = "tool"
 	}
+	th.base, th.emitted, th.planned, th.buffered, th.model = len(history), nil, nil, nil, kind == "model"
 	ctx, span := tracer.Start(ctx, "harness.turn", trace.WithAttributes(
 		attribute.String("kind", kind), attribute.Int("turn", turn), attribute.String("harness", harnessID)))
 	defer func() { endSpan(span, err) }()
@@ -546,6 +546,12 @@ func (d *Controller) runTurn(ctx context.Context, held lease.Held, harnessID str
 	}
 	runErr := exec.Run(runCtx, th)
 	if kind == "model" {
+		if runErr == nil {
+			runErr = th.flush(ctx)
+		}
+		if runErr != nil && len(th.emitted) == 0 {
+			th.planned = nil // calls that never reached the log are not planned
+		}
 		chaos.At(ctx, chaos.ModelCompleted, "")
 	}
 	// Ledger writes after a failed turn must survive the cancellation that
@@ -643,14 +649,19 @@ func (d *Controller) settleCalls(ctx context.Context, gen int64, calls []*proto.
 	return nil
 }
 
-// turnHandler logs and forwards each step of one owned-loop turn and records
-// it for the next turn's history. It replaces each tool call's id with
-// Conductor's call_id before the call is logged or delivered. Completion is
-// written once by execOwnedLoop, not per turn.
+// turnHandler logs and forwards the steps of one owned-loop turn and records
+// them for the next turn's history. It replaces each tool call's id with
+// Conductor's call_id before the call is logged or delivered. A tool turn's
+// results are logged one by one, since each settles its own call (I7b); a
+// model turn's steps are held and logged as one event by flush, so a crash
+// cannot leave part of a turn in the log (I11). Completion is written once by
+// execOwnedLoop, not per turn.
 type turnHandler struct {
 	harnessHandler
 	conversationID string
 	base           int // len(history) when the turn started
+	model          bool
+	buffered       []*proto.Step // a model turn's steps, not yet logged
 	emitted        []*proto.Step
 	planned        []toolledger.PlannedCall
 	// callSpans are the tool.execute spans still open, by call_id.
@@ -659,12 +670,16 @@ type turnHandler struct {
 
 func (t *turnHandler) OnMessage(ctx context.Context, execID string, step *proto.Step) error {
 	if call := step.GetToolCall(); call != nil {
-		p, err := plannedCall(t.conversationID, int64(t.base+len(t.emitted)), call)
+		p, err := plannedCall(t.conversationID, int64(t.base+len(t.emitted)+len(t.buffered)), call)
 		if err != nil {
 			return err
 		}
 		call.Id = p.CallID
 		t.planned = append(t.planned, p)
+	}
+	if t.model {
+		t.buffered = append(t.buffered, step)
+		return nil
 	}
 	if err := t.log(ctx, step); err != nil {
 		return err
@@ -682,6 +697,28 @@ func (t *turnHandler) OnMessage(ctx context.Context, execID string, step *proto.
 }
 
 func (t *turnHandler) OnComplete(ctx context.Context, execID string) error { return nil }
+
+// flush logs a model turn's steps as one event, then delivers them in one
+// response, so a client's step cursor never falls inside the turn.
+func (t *turnHandler) flush(ctx context.Context) error {
+	if len(t.buffered) == 0 {
+		return nil
+	}
+	steps := t.buffered
+	t.buffered = nil
+	logStep, err := t.logger.LogOutputs(ctx, steps, proto.State_STATE_PENDING)
+	if err != nil {
+		return fmt.Errorf("failed to log model turn: %w", err) // I9: nothing delivered
+	}
+	for _, s := range steps {
+		s.Index = logStep
+	}
+	t.emitted = append(t.emitted, steps...)
+	if t.execHandler == nil {
+		return nil
+	}
+	return t.execHandler(&proto.CreateInteractionResponse{Outputs: steps})
+}
 
 // Wait blocks until every Exec in progress has returned, and so has released
 // its lease.

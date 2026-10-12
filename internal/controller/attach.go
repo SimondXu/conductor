@@ -32,9 +32,9 @@ const attachPoll = 100 * time.Millisecond
 // pendingRetry spaces Attach's onPending calls.
 const pendingRetry = time.Second
 
-// Attach sends the conversation's logged steps after afterStep, one per
-// response with Index set to its log step, then each step logged after
-// that, and returns once the run is in a terminal state (PRD.md §6.1,
+// Attach sends the conversation's logged steps after afterStep, one response
+// per event with each step's Index set to the event's log step, then each
+// event logged after that, and returns once the run is in a terminal state (PRD.md §6.1,
 // client-stream catch-up replay). It reads only the log, the source of
 // truth, so every step it sends is durable (I9) and it works on any
 // replica, wherever the run executes. onPending, if set, is called when the
@@ -65,11 +65,16 @@ func (d *Controller) Attach(ctx context.Context, conversationID string, afterSte
 			if step <= afterStep {
 				continue
 			}
+			if len(ev.Steps) == 0 {
+				continue
+			}
+			// One response per event: the client's cursor is the event's
+			// step, so it must never hold part of an event (I11).
 			for _, s := range ev.Steps {
 				s.Index = step
-				if err := send(&proto.CreateInteractionResponse{Outputs: []*proto.Step{s}}); err != nil {
-					return err
-				}
+			}
+			if err := send(&proto.CreateInteractionResponse{Outputs: ev.Steps}); err != nil {
+				return err
 			}
 		}
 		from += int64(len(events))

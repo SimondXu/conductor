@@ -678,16 +678,17 @@ func TestOwnedLoop_RunsScriptToCompletion(t *testing.T) {
 	}
 
 	events, _ := log.Events(context.Background(), "owned")
-	// inputs, thought, call, result, call, result, content, COMPLETED
-	if len(events) != 8 {
-		t.Fatalf("events = %d, want 8", len(events))
+	// inputs, [thought, call], result, [call], result, [content], COMPLETED:
+	// each model turn is one event (I11).
+	if len(events) != 7 || len(events[1].Steps) != 2 {
+		t.Fatalf("events = %d (second has %d steps), want 7 with the first model turn as one event", len(events), len(events[1].Steps))
 	}
-	for i, ev := range events[:7] {
+	for i, ev := range events[:6] {
 		if ev.State != proto.State_STATE_PENDING {
 			t.Errorf("event %d state = %v, want PENDING", i, ev.State)
 		}
 	}
-	if last := events[7]; last.State != proto.State_STATE_COMPLETED || len(last.Steps) != 0 {
+	if last := events[6]; last.State != proto.State_STATE_COMPLETED || len(last.Steps) != 0 {
 		t.Errorf("last event = %v, want COMPLETED with no steps", last)
 	}
 	if delivered != 6 {

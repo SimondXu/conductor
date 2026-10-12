@@ -32,7 +32,8 @@ state=$(psql "SELECT payload::jsonb->>'state' FROM conversation_log WHERE conver
 [[ "$state" == "STATE_COMPLETED" ]] || fail "final state is '$state', want STATE_COMPLETED"
 
 steps=$(psql "SELECT count(*) FROM conversation_log WHERE conversation_id = '$conv'")
-[[ "$steps" == "8" ]] || fail "conversation has $steps log rows, want 8"
+# inputs, [thought, call], result, [call], result, [content], COMPLETED (I11)
+[[ "$steps" == "7" ]] || fail "conversation has $steps log rows, want 7"
 
 effects=$(psql "SELECT count(*) FROM fake_effects e JOIN tool_calls t USING (call_id) WHERE t.conversation_id = '$conv'")
 [[ "$effects" == "2" ]] || fail "fake_effects has $effects rows for $conv, want 2"

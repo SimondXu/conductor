@@ -404,6 +404,28 @@ RETURNING step`, falling back to a read of the existing row.
 ambiguous commit, retry with the same `event_id`, require one row and the same
 returned step.
 
+### I11 — A model turn is in the log whole or not at all
+
+> For a `recovery: full` harness, the steps of one model turn are appended as
+> one event. No log ends inside a model turn.
+
+The owned loop decides what to do next from the end of the history
+(`harness.NeedsTurn`): a tool call or result means another turn, assistant
+content means the run is done. A log that ends inside a model turn breaks
+that rule silently. With a leading thought or a preamble logged and the
+turn's tool calls not, recovery reads the fragment as the final answer,
+writes `COMPLETED`, and the calls the model asked for are never made. None
+of I1–I10 catches it: every step is durable, contiguous and delivered after
+its append. A model turn has no side effects, so the fix is to make it
+atomic and run it again after a crash; tool turns keep one append per
+result, because each result settles its own call (I7b).
+
+**Falsified by** `TestRecover_CrashMidModelTurnRerunsTheTurn`: the owner
+dies after the first step of a model turn reaches the controller; the log
+must hold only the user input, and a resume must make the call once and end
+with the final answer. `TestOwnedLoop_RunsScriptToCompletion` checks the
+event shape.
+
 ---
 
 ## 2. Coverage matrix
