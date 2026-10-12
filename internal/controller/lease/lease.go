@@ -44,6 +44,17 @@ var (
 	}, []string{"reason"})
 )
 
+// Every label value exists from the start at 0, so increase() over a window
+// sees a first event too, also in a replica that restarted inside it.
+func init() {
+	for _, r := range []string{"acquired", "held", "error"} {
+		acquisitions.WithLabelValues(r)
+	}
+	for _, r := range []string{lossPreempted, lossRenewTimeout, lossDeadlineElapsed} {
+		losses.WithLabelValues(r)
+	}
+}
+
 var (
 	// ErrHeld is returned by Acquire when an unexpired lease exists. A lease
 	// is not reentrant: this includes one held by the same owner.

@@ -88,6 +88,12 @@ var (
 	})
 )
 
+func init() {
+	for _, d := range []string{"allowed", "deferred"} {
+		unsafeStarts.WithLabelValues(d) // exists at 0, so increase() sees the first
+	}
+}
+
 func runOutcome(err error) string {
 	switch {
 	case err == nil:

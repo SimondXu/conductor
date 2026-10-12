@@ -1,4 +1,4 @@
-.PHONY: all build proto test test-python clean install deps clean-logs
+.PHONY: all build proto test test-python bench clean install deps clean-logs
 
 # Build all binaries
 all: proto build
@@ -35,6 +35,15 @@ test:
 test-python:
 	@echo "Running Python tests..."
 	@python3 -m pytest python/antigravity/ --timeout=30 --timeout-method=thread
+
+# Load plus every failure class against the compose stack, rebuilt from this
+# tree, with the report of docs/conductor/PRD.md §8. Writes
+# bench/results/<timestamp>/results.json. Pass flags with BENCH_ARGS, e.g.
+# BENCH_ARGS="--duration 30s --repeat 5"; port overrides (GRAFANA_PORT, ...)
+# go to compose from the environment.
+bench: build
+	@docker compose -f deploy/compose/docker-compose.yml up -d --build --wait
+	@./bin/conductor bench $(BENCH_ARGS)
 
 # Clean build artifacts
 clean:

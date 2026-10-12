@@ -943,6 +943,28 @@ released.
 Not built from PRD §5's flag list: `--target` (the class decides),
 `--conversation` and `--assert` (every invariant is always checked).
 
+**As built [M9] (`conductor bench`, `make bench`).** `make bench` rebuilds
+the compose stack from the tree, then `conductor bench` runs load, then each
+class `--repeat` times (default 3), waits up to 2 min for every run to end,
+and checks every invariant over the run's conversations (prefix
+`bench-<unix>-`). It prints PRD §8.2's table and writes
+`bench/results/<timestamp>/results.json`, which is not committed. Where each
+section comes from:
+
+- LOAD: the clients. Sessions are new conversations sent round-robin to
+  the three replicas.
+- RECOVERY: the injections above.
+- INVARIANTS: `internal/invariant`. I8 shows the guard's decisions and
+  `n/a` for violations: nothing after the fact shows a start inside the
+  margin, so `TestUnsafeToolNotStartedNearLeaseExpiry` is its falsifier.
+- TOOL LEDGER, DUPLICATE EFFECTS, EVENT LOG, max generation: the database.
+  A replay is counted per takeover in a chaos conversation: the events
+  below the new owner's generation.
+- OWNERSHIP counts, I8 decisions, attempt-cap abandons: Prometheus
+  `increase()` over the run. Counts a SIGKILLed replica made after its last
+  scrape are lost, so they are lower bounds. Their labeled series are
+  created at 0 on startup so `increase()` sees a first event.
+
 ### 8.2 Detecting duplicate effects mechanically
 
 `fake` appends every side effect to `fake_effects`; a duplicate is more than one
