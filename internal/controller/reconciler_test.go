@@ -299,6 +299,48 @@ func TestExec_RefusedWhileLeaseHeld(t *testing.T) {
 	}
 }
 
+// I8: with less lease left than the UNSAFE budget, even after a renewal, the
+// tool turn does not start: the call stays PLANNED with no attempt and no
+// effect, and the run stays PENDING. With the default budget it then runs.
+func TestUnsafeToolNotStartedNearLeaseExpiry(t *testing.T) {
+	r := newRecRig(t, func(reg *Registry, effects *fake.MemoryEffects) {
+		if err := reg.Register("fake", fake.New(effects), RecoveryFull); err != nil {
+			t.Fatal(err)
+		}
+	})
+	ctx := context.Background()
+	budget := r.c.unsafeBudget
+	r.c.unsafeBudget = 5 * time.Second // above the rig's 2s ttl
+	err := r.c.Exec(ctx, &proto.CreateInteractionEvent{
+		ConversationId: r.conv, AgentId: "fake",
+		AgentConfig: []byte(`{"turns":[{"tool_calls":[{"name":"send_email"}]},{"content":"done"}]}`),
+		Inputs:      []*proto.Step{harnesstest.UserStep("go")},
+	}, nil)
+	if !errors.Is(err, errLeaseMargin) {
+		t.Fatalf("err = %v, want errLeaseMargin", err)
+	}
+	calls, err := r.ledger.Calls(ctx, r.conv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(calls) != 1 || calls[0].Class != toolledger.Unsafe || calls[0].State != toolledger.Planned || calls[0].Attempts != 0 {
+		t.Fatalf("calls = %+v, want one UNSAFE call PLANNED with no attempt", calls)
+	}
+	if len(r.effects.Effects) != 0 {
+		t.Fatal("the UNSAFE call ran inside the lease margin")
+	}
+	r.waitState(t, proto.State_STATE_PENDING)
+
+	r.c.unsafeBudget = budget
+	if err := r.c.Exec(ctx, &proto.CreateInteractionEvent{ConversationId: r.conv}, nil); err != nil {
+		t.Fatal(err)
+	}
+	r.waitState(t, proto.State_STATE_COMPLETED)
+	if len(r.effects.Effects) != 1 {
+		t.Fatalf("effects = %d, want 1", len(r.effects.Effects))
+	}
+}
+
 // M7 DoD: three replicas. The holder dies inside a tool turn with its lease
 // held. B and C both run the reconciler; exactly one takes the run over at a
 // higher generation and completes it once. A's writes at its old generation

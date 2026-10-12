@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"slices"
 	"sync"
 	"time"
 
@@ -51,7 +52,11 @@ type Controller struct {
 	lease    lease.Lease
 	ownerID  string
 	leaseTTL time.Duration
-	active   sync.WaitGroup // Exec calls in progress
+	// unsafeBudget is toolTimeout + margin: the lease time a tool turn with
+	// an UNSAFE call needs left before it starts (I8). There is no tool
+	// timeout yet, so it is one renewal period.
+	unsafeBudget time.Duration
+	active       sync.WaitGroup // Exec calls in progress
 }
 
 // Config configures the controller.
@@ -100,12 +105,13 @@ func New(ctx context.Context, cfg Config) (*Controller, error) {
 		ttl = DefaultLeaseTTL
 	}
 	return &Controller{
-		registry: cfg.Registry,
-		eventLog: eventLog,
-		ledger:   cfg.Ledger,
-		lease:    cfg.Lease,
-		ownerID:  ownerID,
-		leaseTTL: ttl,
+		registry:     cfg.Registry,
+		eventLog:     eventLog,
+		ledger:       cfg.Ledger,
+		lease:        cfg.Lease,
+		ownerID:      ownerID,
+		leaseTTL:     ttl,
+		unsafeBudget: ttl / 3, // the renewal period
 	}, nil
 }
 
@@ -133,11 +139,12 @@ func (d *Controller) exec(ctx context.Context, req *proto.CreateInteractionEvent
 		return fmt.Errorf("conversation_id is required")
 	}
 	ctx = telemetry.WithLogAttrs(ctx, slog.String("conversation_id", req.ConversationId), slog.String("owner_id", d.ownerID))
-	ctx, gen, release, err := d.own(ctx, req.ConversationId)
+	ctx, held, release, err := d.own(ctx, req.ConversationId)
 	if err != nil {
 		return err
 	}
 	defer release()
+	gen := generation(held)
 	ctx = telemetry.WithLogAttrs(ctx, slog.Int64("generation", gen))
 	ctx = executor.WithGeneration(ctx, gen)
 
@@ -179,7 +186,7 @@ func (d *Controller) exec(ctx context.Context, req *proto.CreateInteractionEvent
 	}
 
 	if d.registry.Recovery(harnessID) == RecoveryFull {
-		return d.execOwnedLoop(ctx, req, l, gen, harnessID, h, st, handler)
+		return d.execOwnedLoop(ctx, req, l, held, harnessID, h, st, handler)
 	}
 
 	hhandler := &harnessHandler{
@@ -244,13 +251,12 @@ func (d *Controller) replay(ctx context.Context, conversationID string) (st runS
 }
 
 // own takes the conversation's lease for the duration of one Exec and returns
-// a context that ends when the lease is lost, the generation every ledger
-// write carries, and the release to defer. Without a lease it is a no-op at
-// generation 0. lease.ErrHeld means another controller or client is driving
-// the conversation.
-func (d *Controller) own(ctx context.Context, conversationID string) (context.Context, int64, func(), error) {
+// a context that ends when the lease is lost, the lease, and the release to
+// defer. Without a lease it is a no-op and the lease is nil. lease.ErrHeld
+// means another controller or client is driving the conversation.
+func (d *Controller) own(ctx context.Context, conversationID string) (context.Context, lease.Held, func(), error) {
 	if d.lease == nil {
-		return ctx, 0, func() {}, nil
+		return ctx, nil, func() {}, nil
 	}
 	_, span := tracer.Start(ctx, "lease.acquire")
 	held, err := d.lease.Acquire(ctx, conversationID, d.ownerID, d.leaseTTL)
@@ -259,7 +265,7 @@ func (d *Controller) own(ctx context.Context, conversationID string) (context.Co
 	}
 	endSpan(span, err)
 	if err != nil {
-		return nil, 0, nil, err
+		return nil, nil, nil, err
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	go func() {
@@ -270,12 +276,45 @@ func (d *Controller) own(ctx context.Context, conversationID string) (context.Co
 		}
 	}()
 	go lease.KeepAlive(ctx, held, d.leaseTTL/3)
-	return ctx, held.Generation(), func() {
+	return ctx, held, func() {
 		cancel()
 		if err := held.Release(context.WithoutCancel(ctx)); err != nil && !errors.Is(err, lease.ErrLost) {
 			slog.WarnContext(ctx, "Failed to release the conversation lease", slog.Any("error", err))
 		}
 	}, nil
+}
+
+// generation is the fencing token of held, 0 without a lease.
+func generation(held lease.Held) int64 {
+	if held == nil {
+		return 0
+	}
+	return held.Generation()
+}
+
+// errLeaseMargin refuses a tool turn the lease may not outlast.
+var errLeaseMargin = errors.New("lease too close to expiry to start an UNSAFE tool call")
+
+// checkUnsafeBudget is I8 (correctness.md): a tool turn with an UNSAFE call
+// starts only while the lease has more than unsafeBudget left, renewing once
+// first if it does not. Otherwise its calls stay PLANNED and the run stays
+// PENDING, for recovery to run them under a fresh lease. Remaining is the
+// lease's local monotonic deadline, never a database timestamp.
+func (d *Controller) checkUnsafeBudget(ctx context.Context, held lease.Held, harnessID string, calls []*proto.ToolCallStep) error {
+	if held == nil || !slices.ContainsFunc(calls, func(c *proto.ToolCallStep) bool {
+		return d.registry.ToolClass(harnessID, c.GetFunctionCall().GetName()) == toolledger.Unsafe
+	}) {
+		return nil
+	}
+	if held.Remaining() <= d.unsafeBudget {
+		_ = held.Renew(ctx) // a failed renewal leaves Remaining as it was
+	}
+	if left := held.Remaining(); left <= d.unsafeBudget {
+		unsafeStarts.WithLabelValues("deferred").Inc()
+		return fmt.Errorf("%w: %s left, %s needed", errLeaseMargin, left.Round(time.Millisecond), d.unsafeBudget)
+	}
+	unsafeStarts.WithLabelValues("allowed").Inc()
+	return nil
 }
 
 type harnessHandler struct {
@@ -341,10 +380,11 @@ const maxOwnedLoopTurns = 100
 // A resumed run continues from the history in the log, with the logged
 // agent_config unless the request brings one. Calls it left unanswered are
 // first resolved from the ledger by recoverCalls.
-func (d *Controller) execOwnedLoop(ctx context.Context, req *proto.CreateInteractionEvent, l *logger, gen int64, harnessID string, h harness.Harness, st runState, handler ExecHandler) error {
+func (d *Controller) execOwnedLoop(ctx context.Context, req *proto.CreateInteractionEvent, l *logger, held lease.Held, harnessID string, h harness.Harness, st runState, handler ExecHandler) error {
 	if len(req.Inputs) == 0 && st.State != proto.State_STATE_PENDING {
 		return nil
 	}
+	gen := generation(held)
 	history := st.History
 	if calls := harness.UnansweredToolCalls(history); len(calls) > 0 {
 		// Without the ledger nothing says whether a call had its effect, and
@@ -393,7 +433,7 @@ func (d *Controller) execOwnedLoop(ctx context.Context, req *proto.CreateInterac
 		if turn == maxOwnedLoopTurns {
 			return fmt.Errorf("harness did not finish within %d turns", maxOwnedLoopTurns)
 		}
-		if err := d.runTurn(ctx, gen, harnessID, exec, th, history, turn); err != nil {
+		if err := d.runTurn(ctx, held, harnessID, exec, th, history, turn); err != nil {
 			return err
 		}
 		history = append(history, th.emitted...)
@@ -408,7 +448,8 @@ func (d *Controller) execOwnedLoop(ctx context.Context, req *proto.CreateInterac
 // unanswered calls, a model turn otherwise. Its span is harness.turn, with a
 // model.call child, or one tool.execute child per call that runs from the
 // call's start to its logged result.
-func (d *Controller) runTurn(ctx context.Context, gen int64, harnessID string, exec harness.Execution, th *turnHandler, history []*proto.Step, turn int) (err error) {
+func (d *Controller) runTurn(ctx context.Context, held lease.Held, harnessID string, exec harness.Execution, th *turnHandler, history []*proto.Step, turn int) (err error) {
+	gen := generation(held)
 	th.base, th.emitted, th.planned = len(history), nil, nil
 	pending := harness.UnansweredToolCalls(history)
 	kind := "model"
@@ -438,6 +479,9 @@ func (d *Controller) runTurn(ctx context.Context, gen int64, harnessID string, e
 		}
 	}()
 
+	if err := d.checkUnsafeBudget(ctx, held, harnessID, pending); err != nil {
+		return err
+	}
 	if err := d.startCalls(ctx, gen, pending); err != nil {
 		return err
 	}
