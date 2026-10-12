@@ -22,6 +22,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/simondxu/conductor/internal/harness/ownedloop"
 )
 
 func TestSubstrateNewHarness(t *testing.T) {
@@ -165,6 +167,48 @@ registry:
 	cfg.Registry.OpenAICompat = oc
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "url is required") {
 		t.Fatalf("Validate() = %v, want url-required error", err)
+	}
+}
+
+func TestParse_Anthropic(t *testing.T) {
+	cfg, err := LoadFromBytes([]byte(`
+registry:
+  anthropic:
+    default: true
+    model: claude-opus-5-5
+    effort: high
+    tools:
+      - name: get_weather
+        class: IDEMPOTENT
+        url: http://tools.local/weather
+`))
+	if err != nil {
+		t.Fatalf("LoadFromBytes: %v", err)
+	}
+	ac := cfg.Registry.Anthropic
+	if !ac.Default || ac.Model != "claude-opus-5-5" || ac.Effort != "high" || ac.Tools[0].Class != "IDEMPOTENT" {
+		t.Errorf("anthropic = %+v", ac)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() = %v", err)
+	}
+
+	for _, tc := range []struct {
+		edit func(*AnthropicHarnessConfig)
+		want string
+	}{
+		{func(a *AnthropicHarnessConfig) { a.Effort = "extreme" }, "effort"},
+		{func(a *AnthropicHarnessConfig) { a.Model = "" }, "model is required"},
+		{func(a *AnthropicHarnessConfig) { a.Tools = append(a.Tools, a.Tools[0]) }, "declared twice"},
+	} {
+		c := *cfg
+		a := ac
+		a.Tools = append([]ownedloop.Tool(nil), ac.Tools...)
+		tc.edit(&a)
+		c.Registry.Anthropic = a
+		if err := c.Validate(); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("Validate() = %v, want %q", err, tc.want)
+		}
 	}
 }
 

@@ -654,6 +654,45 @@
           "placement": "bottom"
         }
       }
+    },
+    {
+      "id": 16,
+      "type": "timeseries",
+      "title": "Model latency (p95)",
+      "description": "Is the model or the runtime the bottleneck? Compare with Run duration.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 56
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le, provider, model) (rate(conductor_model_duration_seconds_bucket[5m])))",
+          "legendFormat": "{{provider}} {{model}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
     }
   ]
 }

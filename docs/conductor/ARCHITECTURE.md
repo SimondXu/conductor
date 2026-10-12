@@ -867,12 +867,14 @@ collector instead.
     every hop. Compose dials a fixed harness, so its traces have no
     `executor.acquire`.
 - **Dashboard:** `conductor-runtime` has one panel per PRD §4.2 question
-    (15).
+    (16).
   - "How long did the last recovery take, and how many tool attempts did it
     involve" reads `conductor_last_recovery_{duration_seconds,tool_attempts}`
     from the replica with the newest `conductor_last_recovery_timestamp_seconds`.
     A histogram cannot give the last value.
-  - The Model latency panel waits for `conductor_model_*`.
+  - Model latency (p95) reads `conductor_model_duration_seconds` by provider
+    and model. It is empty unless a model harness is registered; the compose
+    stack runs `fake`.
 
 ### 7.2 Metrics
 
@@ -915,10 +917,13 @@ checks for them by name):
   where an executor is configured; the compose stack dials a fixed harness,
   so it does not have it.
 
-Not emitted yet:
-
-- `conductor_model_*` waits for `openaicompat`. Only it knows a provider and
-  a model, and `fake` would give them a fake label.
+**As built [P1]: `conductor_model_*`.** Emitted by the two model harnesses,
+`openai-compat` and `anthropic`, which run in the controller process under the
+owned loop. They share `internal/harness/ownedloop`, which holds the metrics,
+the tool turn and the turn selection; each harness keeps only its wire format.
+`provider` is the host of `base_url`. `fake` emits none: it would give them a
+fake label. The compose stack runs `fake`, so `smoke.sh` does not check for
+them.
 
 Decisions made while building it:
 
