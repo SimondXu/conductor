@@ -713,6 +713,40 @@ stays and `PRD.md` documents it as the reconnect contract with a retry
 recommendation, or it becomes wait-or-takeover. It must not be left
 undocumented.
 
+**As built [P1]: `ConductorService.Attach`.** A reconnect no longer goes
+through the guard. `proto/conductor.proto` adds Conductor's own service
+beside the inherited one: `ax.proto` follows the pinned upstream and is not
+extended, and #320's `last_seq` is not revived. `Attach(conversation_id,
+after_step)` works like this:
+
+- **What it streams.** Every logged step after `after_step`, one per
+  response with `Step.index` set to its log step. Then it polls
+  `EventsSince` every 100 ms and sends each new step, and ends when the run
+  is `COMPLETED`, `FAILED` or `CANCELED`.
+- **Where it runs.** It reads only the log, so every step it sends is
+  durable (I9), and any replica serves it, wherever the run executes. It
+  takes no in-flight slot, so a client that reconnects while its old turn
+  unwinds is not refused.
+- **Who drives the run.** While the run is `PENDING`, Attach resumes it
+  itself, at most once and under the in-flight guard: SQLite has no
+  reconciler, and on PostgreSQL this saves waiting for one. While someone
+  else drives the run, so its lease is held or the conversation is in
+  flight here, it may try again a second later. Once its own resume has run,
+  successful or not, retrying belongs to the reconciler and its poison
+  guard.
+- **Granularity.** The unit is the log event. An event with several steps
+  (the user inputs, a failed run's error results) is sent whole.
+- **Client.** `conductor run --server … --conversation <id> --resume
+  --after-step N` uses Attach. A broken stream prints that command with
+  the last step received.
+- **Checked.** `TestAttach_ReconnectGetsEveryMissedStepOnce`: through a real
+  gRPC server on PostgreSQL, a client drops after the first tool call, and
+  a second one attached at that step receives exactly the log's later
+  steps, in order, until `COMPLETED`. With the boundary off by one, it
+  fails on a duplicate. On compose, a `kill -9`ed CLI client re-attached
+  on another replica and got the rest of the run while a third replica
+  finished it.
+
 ---
 
 ## 7. Observability

@@ -39,6 +39,7 @@ import (
 // Server implements the AXService gRPC service.
 type Server struct {
 	proto.UnimplementedInteractionsServiceServer
+	proto.UnimplementedConductorServiceServer
 
 	controller *controller.Controller
 	grpcServer *grpc.Server
@@ -78,6 +79,53 @@ func (s *Server) CreateInteraction(req *proto.CreateInteractionEvent, stream grp
 	return err
 }
 
+// Attach re-attaches a client to a conversation: the steps it missed, then
+// the live ones until the run ends (PRD.md §6.1). It is not in-flight
+// guarded, since it only reads the log, so a client that reconnects while
+// its previous turn is still unwinding is not refused. If the run is PENDING
+// it is also resumed once here, in case nobody is driving it: on SQLite
+// there is no reconciler, and on PostgreSQL this saves waiting for one.
+func (s *Server) Attach(req *proto.AttachRequest, stream grpc.ServerStreamingServer[proto.CreateInteractionResponse]) error {
+	ctx := stream.Context()
+	var driving sync.WaitGroup
+	defer driving.Wait()
+	// Resume at most once ourselves. While someone else drives the run (in
+	// flight here, or its lease held elsewhere) we may try again later; once
+	// our own resume has run, success or not, retrying is the reconciler's
+	// job, under its poison guard.
+	var mu sync.Mutex
+	busy, done := false, false
+	resume := func() {
+		mu.Lock()
+		defer mu.Unlock()
+		if busy || done {
+			return
+		}
+		inFlight, cleanup := s.markInFlight(req.ConversationId)
+		if inFlight {
+			return
+		}
+		busy = true
+		driving.Go(func() {
+			defer cleanup()
+			err := s.controller.Exec(ctx, &proto.CreateInteractionEvent{ConversationId: req.ConversationId}, nil)
+			if err != nil && !errors.Is(err, lease.ErrHeld) && ctx.Err() == nil {
+				slog.WarnContext(ctx, "Resuming an attached run failed", slog.String("conversation_id", req.ConversationId), slog.Any("error", err))
+			}
+			mu.Lock()
+			busy, done = false, !errors.Is(err, lease.ErrHeld)
+			mu.Unlock()
+		})
+	}
+	err := s.controller.Attach(ctx, req.ConversationId, req.AfterStep, func(resp *proto.CreateInteractionResponse) error {
+		return stream.Send(resp)
+	}, resume)
+	if errors.Is(err, controller.ErrNoConversation) {
+		return status.Error(codes.NotFound, err.Error())
+	}
+	return err
+}
+
 // Serve starts the gRPC server on the specified address.
 func (s *Server) Serve(address string, opts ...grpc.ServerOption) error {
 	lis, err := net.Listen("tcp", address)
@@ -93,6 +141,7 @@ func (s *Server) Serve(address string, opts ...grpc.ServerOption) error {
 
 	s.grpcServer = grpc.NewServer(opts...)
 	proto.RegisterInteractionsServiceServer(s.grpcServer, s)
+	proto.RegisterConductorServiceServer(s.grpcServer, s)
 
 	// Register standard gRPC Health Check server.
 	hs := health.NewServer()

@@ -38,6 +38,11 @@ type EventLog interface {
 	// Events returns all events for the conversation.
 	Events(ctx context.Context, conversationID string) ([]*proto.StepEvent, error)
 
+	// EventsSince returns the conversation's events after afterStep. Steps
+	// run from 1 with no gaps (I5), so the i-th event returned is step
+	// afterStep+1+i.
+	EventsSince(ctx context.Context, conversationID string, afterStep int64) ([]*proto.StepEvent, error)
+
 	// Close releases the underlying resources and closes the log.
 	Close() error
 }

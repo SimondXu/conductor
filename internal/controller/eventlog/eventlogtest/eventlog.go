@@ -59,6 +59,15 @@ func (m *MemoryEventLog) Events(_ context.Context, conversationID string) ([]*pr
 	return out, nil
 }
 
+// EventsSince returns the conversation's events after afterStep.
+func (m *MemoryEventLog) EventsSince(ctx context.Context, conversationID string, afterStep int64) ([]*proto.StepEvent, error) {
+	events, _ := m.Events(ctx, conversationID)
+	if afterStep >= int64(len(events)) {
+		return nil, nil
+	}
+	return events[afterStep:], nil
+}
+
 // Drop removes every event for which drop returns true.
 // It is provided for testing and crash-simulation purposes.
 func (m *MemoryEventLog) Drop(drop func(*proto.StepEvent) bool) {
