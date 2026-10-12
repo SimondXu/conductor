@@ -461,8 +461,12 @@ documented as unsupported; Apache-2.0 attribution is unaffected.
   `gvisor`, with handler `runsc`. Nothing else changes: the pod lifecycle,
   fencing and recovery are the same.
 - **The e2e.** `GVISOR=1 deploy/k8s/kind-e2e.sh`:
-  1. Installs `runsc` and its containerd shim on the kind node, from gVisor's
-     release bucket, sha512-checked.
+  1. Installs `runsc` and its containerd shim on the kind node. gVisor
+     ships each release as one `gvisor.tar.bz2`, and the `latest/runsc`
+     URLs older guides give return 404. So the script fetches the pinned
+     release's tarball (`GVISOR_RELEASE`, default 20260928) on the host,
+     sha512-checks it, and copies only the two binaries into the node. The
+     extraction uses GNU tar, so this mode runs on Linux, as in CI.
   2. Registers the `runsc` handler with containerd.
   3. Runs the M6 assertion (delete the harness pod mid-tool-call; the run
      recovers and completes) with `runtime_class: gvisor`.

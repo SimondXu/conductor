@@ -19,7 +19,7 @@
 # leaves it running; KIND_CLUSTER names it.
 #
 # GVISOR=1 (P1) first installs gVisor's runsc on the node (GVISOR_RELEASE,
-# default latest, sha512-checked), runs the harness pods with
+# default 20260928, sha512-checked), runs the harness pods with
 # runtime_class: gvisor, and also asserts that the harness pod's kernel is
 # gVisor's.
 set -euo pipefail
@@ -41,19 +41,25 @@ until_eq() {
 }
 
 # install_runsc puts runsc and its containerd shim on the node and registers
-# the runtime handler runsc, once.
+# the runtime handler runsc, once. gVisor publishes each release as one
+# tarball; it is fetched and checked on this host, which has bzip2, and only
+# the two binaries are copied into the node. Needs GNU tar (Linux, as in CI).
 install_runsc() {
   local node="$cluster-control-plane"
   if ! docker exec "$node" test -x /usr/local/bin/runsc; then
-    local url="https://storage.googleapis.com/gvisor/releases/release/${GVISOR_RELEASE:-latest}/$(docker exec "$node" uname -m)"
-    docker exec "$node" sh -ec "cd /usr/local/bin
-      for f in runsc containerd-shim-runsc-v1; do
-        curl -fsSL -o \$f $url/\$f
-        curl -fsSL -o \$f.sha512 $url/\$f.sha512
-      done
-      sha512sum -c runsc.sha512 containerd-shim-runsc-v1.sha512
-      chmod +x runsc containerd-shim-runsc-v1"
-    docker exec "$node" sh -ec 'printf "%s\n" "[plugins.\"io.containerd.grpc.v1.cri\".containerd.runtimes.runsc]" "  runtime_type = \"io.containerd.runsc.v1\"" >> /etc/containerd/config.toml
+    local tmp url
+    tmp=$(mktemp -d)
+    url="https://storage.googleapis.com/gvisor/releases/release/${GVISOR_RELEASE:-20260928}/$(docker exec "$node" uname -m)/gvisor.tar.bz2"
+    curl -fsSL -o "$tmp/gvisor.tar.bz2" "$url"
+    curl -fsSL -o "$tmp/gvisor.tar.bz2.sha512" "$url.sha512"
+    (cd "$tmp" && shasum -a 512 -c gvisor.tar.bz2.sha512)
+    tar -xjf "$tmp/gvisor.tar.bz2" -C "$tmp" --wildcards '*runsc' '*containerd-shim-runsc-v1'
+    for bin in runsc containerd-shim-runsc-v1; do
+      docker cp "$(find "$tmp" -type f -name "$bin" | head -1)" "$node:/usr/local/bin/$bin"
+    done
+    rm -rf "$tmp"
+    docker exec "$node" sh -ec 'chmod +x /usr/local/bin/runsc /usr/local/bin/containerd-shim-runsc-v1
+      printf "%s\n" "[plugins.\"io.containerd.grpc.v1.cri\".containerd.runtimes.runsc]" "  runtime_type = \"io.containerd.runsc.v1\"" >> /etc/containerd/config.toml
       systemctl restart containerd'
     kubectl --context "kind-$cluster" wait --for=condition=Ready node --all --timeout 120s
   fi
