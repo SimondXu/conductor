@@ -133,9 +133,10 @@ history), so tools still execute inside the execution environment and
 `harness_kill` mid-tool stays meaningful. Recovery is the same loop with history
 rebuilt from the log (§6.1).
 
-Until the reconciler lands (M4), a resumed conversation whose history ends in
-an unanswered tool call is refused rather than re-executed: re-running an
-`UNSAFE` call without the ledger would be exactly the duplicate effect the
+A resumed conversation whose history ends in an unanswered tool call is
+resolved from the ledger before the next turn (§6.1, "Resolving unanswered
+calls"). Without a ledger (SQLite) it is refused rather than re-executed:
+re-running an `UNSAFE` call blind would be exactly the duplicate effect the
 project exists to prevent.
 
 ---
@@ -523,6 +524,37 @@ for ref in (A ∪ B), bounded concurrency:
 pending input steps, and planned-but-unsettled calls. Where a `call_id` has
 several `ToolResultStep`s — normal after repeated `IDEMPOTENT` retries — **the
 last by `step` wins** **[R2]**; without that rule I6 is ambiguous.
+
+**Resolving unanswered calls [M4].** `recoverOne`'s ledger step is
+`recoverCalls` (`internal/controller/recover.go`), and a client `--resume`
+runs the same code. Decisions made while building it:
+
+- **A call answered in the log but still `STARTED` or `OUTCOME_UNKNOWN`** (the
+  owner died between appending the result and settling it) is settled from
+  the logged result, the last by `step` winning, and not run again. This runs
+  on every resume of a `PENDING` run, not only when calls are unanswered:
+  the window can fall on the last tool result before a model turn.
+- **A call with no ledger row** (the owner died between logging the call and
+  planning it) is planned under its logged `call_id` and run: it never
+  started, so it cannot have had an effect.
+- **`RECONCILABLE` with an unknown outcome stops the resume** with an error
+  and stays `OUTCOME_UNKNOWN`. No query mechanism exists yet; the loop's
+  `ExpireDeadlines` abandons it at `reconcile_deadline`.
+- **When the run fails** (any `UNSAFE` call with an unknown outcome), every
+  unanswered call of the turn is closed: unknown ones are settled
+  `ABANDONED`, and each unanswered call gets an error `ToolResultStep`,
+  written **in the same event as `STATE_FAILED`**. Without the result, the
+  history would keep a call no later turn may answer, and an OpenAI-compatible
+  endpoint rejects a tool call with no tool message; written separately, a
+  crash between the two would leave the run answered but `PENDING`, and the
+  next pass would run a model turn instead of failing. I7b holds: the
+  falsifying query checks only `SUCCEEDED`.
+- **New input over unanswered calls is refused** ("resume it first"), so a
+  tool result is never logged after a later user message.
+- **A step joins the turn's history only after its append succeeds, and
+  before it is delivered**, so a result that never became durable cannot
+  settle its call `SUCCEEDED` (I7b), and a durable one still settles when the
+  client has gone away.
 
 ### 6.2 Losing the lease mid-execution
 

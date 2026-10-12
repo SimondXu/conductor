@@ -623,13 +623,23 @@ func TestExec_NewConversationLogsCanonicalDefault(t *testing.T) {
 	}, ExecHandler(func(*proto.CreateInteractionResponse) error { return nil })); err != nil {
 		t.Fatalf("exec: %v", err)
 	}
-	_, stored, _, err := newLogger(log, cid, "").ResumptionState(ctx)
-	if err != nil {
-		t.Fatalf("ResumptionState: %v", err)
-	}
-	if stored != "harness-a" {
+	if stored := rebuilt(t, log, cid).HarnessID; stored != "harness-a" {
 		t.Errorf("logged harness id = %q, want canonical %q (not empty)", stored, "harness-a")
 	}
+}
+
+// rebuilt is conv's state rebuilt from log.
+func rebuilt(t *testing.T, log eventlog.EventLog, conv string) runState {
+	t.Helper()
+	events, err := log.Events(context.Background(), conv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := rebuild(events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return st
 }
 
 func newOwnedLoopController(t *testing.T, log *eventlogtest.MemoryEventLog, effects *fake.MemoryEffects) *Controller {
@@ -688,7 +698,8 @@ func TestOwnedLoop_RunsScriptToCompletion(t *testing.T) {
 	}
 }
 
-func TestOwnedLoop_RefusesUnansweredToolCall(t *testing.T) {
+// Without the ledger nothing says whether the call had its effect.
+func TestOwnedLoop_RefusesUnansweredToolCallWithoutLedger(t *testing.T) {
 	log := &eventlogtest.MemoryEventLog{}
 	effects := &fake.MemoryEffects{}
 	ctx := context.Background()
@@ -726,15 +737,13 @@ func TestOwnedLoop_ResumesAfterFailedModelTurn(t *testing.T) {
 	if err == nil {
 		t.Fatal("first Exec: want the fail_once error")
 	}
-	if err := c.Exec(ctx, &proto.CreateInteractionEvent{ConversationId: "retry", AgentConfig: cfg}, nil); err != nil {
+	// The resume brings no agent_config: the logged script is used.
+	if err := c.Exec(ctx, &proto.CreateInteractionEvent{ConversationId: "retry"}, nil); err != nil {
 		t.Fatalf("resume: %v", err)
 	}
-	state, _, steps, err := newLogger(log, "retry", "").ResumptionState(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if state != proto.State_STATE_COMPLETED || len(steps) != 2 {
-		t.Fatalf("state = %v, steps = %d; want COMPLETED with user + assistant", state, len(steps))
+	st := rebuilt(t, log, "retry")
+	if st.State != proto.State_STATE_COMPLETED || len(st.History) != 2 || st.History[1].GetContent().GetContent()[0].GetText().GetText() != "hello" {
+		t.Fatalf("state = %v, steps = %v; want COMPLETED with user + scripted hello", st.State, st.History)
 	}
 }
 
@@ -832,8 +841,7 @@ func TestFailedTurnDoesNotWedgeConversation(t *testing.T) {
 	if err := c.Exec(context.Background(), req(), nil); err == nil {
 		t.Fatal("first Exec: want error")
 	}
-	state, _, _, _ := newLogger(log, "wedge", "").ResumptionState(context.Background())
-	if state != proto.State_STATE_FAILED {
+	if state := rebuilt(t, log, "wedge").State; state != proto.State_STATE_FAILED {
 		t.Fatalf("state after failure = %v, want FAILED", state)
 	}
 	failing = false

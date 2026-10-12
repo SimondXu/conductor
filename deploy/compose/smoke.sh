@@ -40,6 +40,28 @@ effects=$(psql "SELECT count(*) FROM fake_effects e JOIN tool_calls t USING (cal
 settled=$(psql "SELECT count(*) FROM tool_calls WHERE conversation_id = '$conv' AND state = 'SUCCEEDED' AND attempts = 1")
 [[ "$settled" == "2" ]] || fail "tool_calls has $settled settled calls for $conv, want 2"
 
+# Crash and resume (M4): the fake harness dies after charge_card's effect and
+# before its result. The run fails; --resume, with no input and no
+# agent_config, runs the IDEMPOTENT call again under the same key and
+# completes.
+crash="crash-$(date +%s)"
+cfg='{"turns":[{"tool_calls":[{"name":"charge_card","args":{"amount":4200}}]},{"content":"Charged."}],"tools":{"charge_card":{"idempotent":true,"crash_after_effect":true}}}'
+if dc exec -T conductor conductor run --server localhost:8494 --conversation "$crash" --agent-config "$cfg" --input "charge me"; then
+  fail "the crashing run succeeded"
+fi
+for _ in $(seq 1 30); do
+  [[ "$(dc ps --format '{{.State}}' fake-harness)" == "running" ]] && break
+  sleep 1
+done
+dc exec -T conductor conductor run --server localhost:8494 --conversation "$crash" --resume
+
+state=$(psql "SELECT payload::jsonb->>'state' FROM conversation_log WHERE conversation_id = '$crash' ORDER BY step DESC LIMIT 1")
+[[ "$state" == "STATE_COMPLETED" ]] || fail "resumed run's final state is '$state', want STATE_COMPLETED"
+call=$(psql "SELECT state || ' ' || attempts FROM tool_calls WHERE conversation_id = '$crash'")
+[[ "$call" == "SUCCEEDED 2" ]] || fail "resumed call is '$call', want 'SUCCEEDED 2'"
+effects=$(psql "SELECT count(*) FROM fake_effects e JOIN tool_calls t USING (call_id) WHERE t.conversation_id = '$crash'")
+[[ "$effects" == "1" ]] || fail "resumed run has $effects effects, want 1"
+
 # Falsifying queries from docs/conductor/correctness.md; each must be empty.
 check() {
   local rows
@@ -62,4 +84,4 @@ for _ in $(seq 1 12); do
 done
 [[ -n "$runs" && "$runs" != "0" ]] || fail "Prometheus has no completed runs"
 
-echo "PASS: $conv completed with $steps log rows, $effects effects, $settled settled calls; I1, I2, I7b hold; Prometheus sees $runs completed run(s)"
+echo "PASS: $conv completed with $steps log rows and $settled settled calls; $crash resumed after a crash with one effect over two attempts; I1, I2, I7b hold; Prometheus sees $runs completed run(s)"
