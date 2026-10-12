@@ -523,6 +523,20 @@ turn is still unwinding, you get gRPC `FAILED_PRECONDITION` with
 in-process guard in `internal/server/server.go:62-65` and it is intentionally
 conservative.
 
+**As built [P1].** Catch-up replay has shipped:
+- **Re-attaching.** `conductor run --server <addr> --conversation <id>
+  --resume --after-step N` re-attaches through the new
+  `ConductorService.Attach` RPC. It sends the steps after `N`, then the live
+  ones, until the run ends. It works on any replica, and it is not refused
+  while the old turn unwinds.
+- **The DoD.** After a drop, the steps received before and after the
+  reconnect are exactly the logged steps, with none lost and none
+  repeated, and the stream ends with the run.
+  `TestAttach_ReconnectGetsEveryMissedStepOnce` checks this. The design is
+  in ARCHITECTURE §6.3.
+- **What remains of the P0 behaviour.** The in-flight error still applies
+  to `CreateInteraction`, that is, to sending new input.
+
 ### 6.2 Four failure cases
 
 **The client disconnects (`Ctrl-C`, network drop, pod eviction of the caller).**

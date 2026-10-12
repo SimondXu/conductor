@@ -105,11 +105,16 @@ func (l *sqlEventLog) Append(ctx context.Context, event *proto.StepEvent, gen in
 }
 
 // Events retrieves all events from the database for a conversation, ordered by step.
-func (l *sqlEventLog) Events(ctx context.Context, conversationID string) (events []*proto.StepEvent, err error) {
+func (l *sqlEventLog) Events(ctx context.Context, conversationID string) ([]*proto.StepEvent, error) {
+	return l.EventsSince(ctx, conversationID, 0)
+}
+
+// EventsSince retrieves a conversation's events after afterStep, ordered by step.
+func (l *sqlEventLog) EventsSince(ctx context.Context, conversationID string, afterStep int64) (events []*proto.StepEvent, err error) {
 	ctx, endSpan := l.startSpan(ctx, "events", conversationID)
 	defer func() { endSpan(err) }()
 
-	rows, err := l.db.QueryContext(ctx, "SELECT payload FROM conversation_log WHERE conversation_id = $1 ORDER BY step", conversationID)
+	rows, err := l.db.QueryContext(ctx, "SELECT payload FROM conversation_log WHERE conversation_id = $1 AND step > $2 ORDER BY step", conversationID, afterStep)
 	if err != nil {
 		return nil, fmt.Errorf("eventlog: query conversation: %w", err)
 	}

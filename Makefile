@@ -17,7 +17,7 @@ proto:
 	@export PATH=$$PATH:$$(go env GOPATH)/bin && \
 		protoc --go_out=. --go_opt=paths=source_relative \
 		       --go-grpc_out=. --go-grpc_opt=paths=source_relative \
-		       proto/ax.proto proto/content.proto
+		       proto/ax.proto proto/content.proto proto/conductor.proto
 	@python3 -m grpc_tools.protoc -I. --python_out=python --grpc_python_out=python proto/ax.proto proto/content.proto
 	@$$(go env GOPATH)/bin/addlicense -l apache python/proto/*.py
 	@echo "Protobuf generation complete!"
