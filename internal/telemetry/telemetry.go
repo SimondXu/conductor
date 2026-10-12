@@ -104,3 +104,13 @@ func detectGCPProjectID(ctx context.Context) string {
 	}
 	return ""
 }
+
+// FromEnv exports traces when OTEL_EXPORTER_OTLP_ENDPOINT is set, which the
+// exporter reads itself, and is a no-op otherwise. The CLI client and the
+// harness processes use it, so one trace can cross every process.
+func FromEnv(ctx context.Context, service string) (func(context.Context) error, error) {
+	if os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT") == "" {
+		return func(context.Context) error { return nil }, nil
+	}
+	return SetTraceProvider(ctx, service)
+}

@@ -16,6 +16,10 @@
 version: v1alpha
 server:
   address: 0.0.0.0:8494
+telemetry:
+  otlp:
+    enabled: true
+    endpoint: jaeger:4317
 eventlog:
   postgres:
     dsn: ${CONDUCTOR_DSN}

@@ -27,6 +27,8 @@ import (
 	"github.com/simondxu/conductor/internal/controller/toolledger"
 	"github.com/simondxu/conductor/internal/telemetry"
 	"github.com/simondxu/conductor/proto"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // ReconcilerConfig configures RunReconciler. Zero fields take the defaults
@@ -140,11 +142,16 @@ func (d *Controller) recoverOne(ctx context.Context, runs eventlog.RunIndex, c e
 	slog.InfoContext(lctx, "recovery.start", slog.Int("attempt", n),
 		slog.String("kill_kind", c.KillKind), slog.Float64("idle_seconds", c.Idle.Seconds()))
 	start := time.Now()
-	err = d.Exec(ctx, &proto.CreateInteractionEvent{ConversationId: id}, nil)
+	sctx, span := tracer.Start(ctx, "recovery", trace.WithNewRoot(), trace.WithAttributes(
+		attribute.String("conversation_id", id), attribute.String("kill_kind", c.KillKind), attribute.Int("attempt", n)))
+	err = d.Exec(sctx, &proto.CreateInteractionEvent{ConversationId: id}, nil)
+	endSpan(span, err)
 	result := "success"
 	switch {
 	case err == nil:
-		recoveryDuration.WithLabelValues(c.KillKind).Observe((c.Idle + time.Since(start)).Seconds())
+		stall := (c.Idle + time.Since(start)).Seconds()
+		recoveryDuration.WithLabelValues(c.KillKind).Observe(stall)
+		d.recordLastRecovery(ctx, id, stall)
 	case errors.Is(err, lease.ErrHeld):
 		result = "held"
 	default:
@@ -153,6 +160,22 @@ func (d *Controller) recoverOne(ctx context.Context, runs eventlog.RunIndex, c e
 	recoveryTotal.WithLabelValues(result).Inc()
 	slog.InfoContext(lctx, "recovery.complete", slog.String("result", result), slog.Int("attempt", n),
 		slog.Float64("duration_seconds", time.Since(start).Seconds()), slog.Any("error", err))
+}
+
+// recordLastRecovery sets the last-recovery gauges.
+func (d *Controller) recordLastRecovery(ctx context.Context, id string, stall float64) {
+	calls, err := d.ledger.Calls(ctx, id)
+	if err != nil {
+		slog.WarnContext(ctx, "Last recovery's tool attempts unknown", slog.Any("error", err))
+		return
+	}
+	attempts := 0
+	for _, c := range calls {
+		attempts += c.Attempts
+	}
+	lastRecoveryDuration.Set(stall)
+	lastRecoveryToolAttempts.Set(float64(attempts))
+	lastRecoveryTime.SetToCurrentTime()
 }
 
 // poison fails a PENDING run whose recovery keeps failing. Calls it left

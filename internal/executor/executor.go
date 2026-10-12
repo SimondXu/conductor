@@ -25,6 +25,10 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/simondxu/conductor/internal/harness"
 	"github.com/simondxu/conductor/internal/harness/remote"
@@ -87,10 +91,17 @@ var _ harness.Harness = (*Harness)(nil)
 func (h *Harness) Start(ctx context.Context, conversationID string, config []byte) (harness.Execution, error) {
 	gen := generation(ctx)
 	start := time.Now()
+	_, span := otel.Tracer("conductor.executor").Start(ctx, "executor.acquire",
+		trace.WithAttributes(attribute.Int64("generation", gen)))
 	t, err := h.Executor.Acquire(ctx, conversationID, Spec{Generation: gen})
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		span.End()
 		return nil, fmt.Errorf("executor: acquire %s: %w", conversationID, err)
 	}
+	span.SetAttributes(attribute.String("kind", t.Kind), attribute.String("addr", t.Addr))
+	span.End()
 	acquireDuration.WithLabelValues(t.Kind).Observe(time.Since(start).Seconds())
 	release := func(ctx context.Context) error { return h.Executor.Release(ctx, conversationID, gen) }
 	rh, err := remote.NewHarness(t.Addr, h.AgentID)

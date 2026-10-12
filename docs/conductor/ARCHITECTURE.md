@@ -730,6 +730,47 @@ work adds domain spans, not the pipeline. **Change the default endpoint
 out-of-the-box Conductor points its traces at Google. Default to the local
 collector instead.
 
+**As built [M8].**
+
+- **Spans:**
+  - `exec` (one per `Exec`) has three children: `lease.acquire` (with the
+    generation), `replay` (with the event count) and `harness.turn` (`kind`
+    is `model` or `tool`).
+  - A model turn has a `model.call` child that wraps the turn's `Run`.
+  - A tool turn has one `tool.execute` per call, open from the call's start
+    until its result is logged, or ended with an error status if no result
+    came. A tool turn's `Run` is one RPC for every call, so the RPC span is
+    `tool.execute`'s sibling, not its child.
+  - `executor.acquire` comes from `executor.Harness`, `eventlog.append` and
+    `eventlog.events` from the log, and `recovery` is a new root for each
+    reconciler recovery.
+- **Every process exports.**
+  - `serve` reads `telemetry.otlp` from its config. Its default endpoint is
+    now `localhost:4317`; Google Cloud Trace is used only when it is
+    configured explicitly.
+  - The CLI client (`conductor.run`, the root span) and `conductor harness
+    fake` export when `OTEL_EXPORTER_OTLP_ENDPOINT` is set.
+  - gRPC client and server stats handlers carry the context across
+    processes.
+  - Local executor subprocesses inherit the environment, so they export too.
+- **The DoD is checked twice.**
+  - `TestTrace_OneTraceFromClientToAppend` drives a real gRPC server and a
+    local executor subprocess on Postgres. One trace holds the client span,
+    the server span, `exec`, `lease.acquire`, `replay`, `executor.acquire`,
+    `harness.turn`, `model.call`, `tool.execute` and `eventlog.append`.
+  - The compose stack exports to Jaeger 2 (UI on `:16686`, a Grafana data
+    source). `smoke.sh` finds the client's trace for a run and requires
+    spans from `conductor-cli`, `conductor-server` and `fake-harness`, with
+    every hop. Compose dials a fixed harness, so its traces have no
+    `executor.acquire`.
+- **Dashboard:** `conductor-runtime` has one panel per PRD §4.2 question
+    (15).
+  - "How long did the last recovery take, and how many tool attempts did it
+    involve" reads `conductor_last_recovery_{duration_seconds,tool_attempts}`
+    from the replica with the newest `conductor_last_recovery_timestamp_seconds`.
+    A histogram cannot give the last value.
+  - The Model latency panel waits for `conductor_model_*`.
+
 ### 7.2 Metrics
 
 Every metric answers a stated operational question.

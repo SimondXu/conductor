@@ -40,7 +40,7 @@ type sqlEventLog struct {
 // Append serializes the event to JSON and inserts it into the database. It is
 // idempotent on event.EventId when that is set.
 func (l *sqlEventLog) Append(ctx context.Context, event *proto.StepEvent, gen int64) (step int64, err error) {
-	ctx, endSpan := l.startSpan(ctx, "Append", event.ConversationId)
+	ctx, endSpan := l.startSpan(ctx, "append", event.ConversationId)
 	defer func() { endSpan(err) }()
 
 	tx, err := l.db.BeginTx(ctx, nil)
@@ -106,7 +106,7 @@ func (l *sqlEventLog) Append(ctx context.Context, event *proto.StepEvent, gen in
 
 // Events retrieves all events from the database for a conversation, ordered by step.
 func (l *sqlEventLog) Events(ctx context.Context, conversationID string) (events []*proto.StepEvent, err error) {
-	ctx, endSpan := l.startSpan(ctx, "Events", conversationID)
+	ctx, endSpan := l.startSpan(ctx, "events", conversationID)
 	defer func() { endSpan(err) }()
 
 	rows, err := l.db.QueryContext(ctx, "SELECT payload FROM conversation_log WHERE conversation_id = $1 ORDER BY step", conversationID)
@@ -144,7 +144,7 @@ func (l *sqlEventLog) startSpan(ctx context.Context, name string, conversationID
 	const tracerName = "eventlog.sql"
 	tracer := otel.Tracer(tracerName)
 
-	ctx, span := tracer.Start(ctx, tracerName+"/"+name, trace.WithAttributes(
+	ctx, span := tracer.Start(ctx, "eventlog."+name, trace.WithAttributes(
 		attribute.String("conversation_id", conversationID),
 	))
 	return ctx, func(err error) {

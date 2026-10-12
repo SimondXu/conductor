@@ -39,51 +39,11 @@ import (
 // runs the call again under the same key and completes: one effect, two
 // attempts.
 func TestLocal_HarnessKillIsRecovered(t *testing.T) {
-	dsn := os.Getenv("PG_TEST_DSN")
-	if dsn == "" {
-		t.Skip("PG_TEST_DSN not set")
-	}
-	if _, err := schema.Up(dsn); err != nil {
-		t.Fatal(err)
-	}
-	log, err := eventlog.OpenPostgresEventLog(dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ledger, err := toolledger.OpenPostgres(dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	leases, err := lease.OpenPostgres(dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	db, err := sql.Open("pgx", dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { db.Close() })
-	local := &executor.Local{Command: []string{os.Args[0]}, Env: []string{"CONDUCTOR_TEST_HARNESS=1"}}
-	t.Cleanup(func() { local.Close() })
-	reg := controller.NewRegistry()
-	if err := reg.Register("fake", &executor.Harness{Executor: local, AgentID: "fake"}, controller.RecoveryFull); err != nil {
-		t.Fatal(err)
-	}
-	reg.DeclareTools("fake", map[string]toolledger.Class{"charge_card": toolledger.Idempotent})
-	c, err := controller.New(context.Background(), controller.Config{
-		Registry:        reg,
-		EventLogBuilder: func() (eventlog.EventLog, error) { return log, nil },
-		Ledger:          ledger, Lease: leases, OwnerID: "test-" + uuid.NewString(), LeaseTTL: 2 * time.Second,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { c.Close() })
-
+	c, db := newPGController(t)
 	conv := t.Name() + "-" + uuid.NewString()
 	ctx := context.Background()
-	err = c.Exec(ctx, &proto.CreateInteractionEvent{
-		ConversationId: conv, AgentId: "fake",
+	err := c.Exec(ctx, &proto.CreateInteractionEvent{
+		ConversationId: conv, AgentId: testHarnessID,
 		AgentConfig: []byte(`{"turns":[{"tool_calls":[{"name":"charge_card"}]},{"content":"done"}],"tools":{"charge_card":{"idempotent":true,"crash_after_effect":true}}}`),
 		Inputs:      []*proto.Step{harnesstest.UserStep("go")},
 	}, nil)
@@ -118,4 +78,57 @@ func TestLocal_HarnessKillIsRecovered(t *testing.T) {
 	if call != "SUCCEEDED 2" || effects != 1 {
 		t.Fatalf("call = %q with %d effects, want SUCCEEDED 2 with 1", call, effects)
 	}
+}
+
+// testHarnessID is this package's harness id. Reconcilers recover only
+// their registry's harnesses, so other packages' tests, sharing the
+// database, never take these runs over, nor these tests theirs.
+const testHarnessID = "fake-executor-test"
+
+// newPGController is a controller on PG_TEST_DSN whose fake harness runs in
+// local executor subprocesses (this test binary, see TestMain), with
+// charge_card declared IDEMPOTENT.
+func newPGController(t *testing.T) (*controller.Controller, *sql.DB) {
+	t.Helper()
+	dsn := os.Getenv("PG_TEST_DSN")
+	if dsn == "" {
+		t.Skip("PG_TEST_DSN not set")
+	}
+	if _, err := schema.Up(dsn); err != nil {
+		t.Fatal(err)
+	}
+	log, err := eventlog.OpenPostgresEventLog(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger, err := toolledger.OpenPostgres(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leases, err := lease.OpenPostgres(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	local := &executor.Local{Command: []string{os.Args[0]}, Env: []string{"CONDUCTOR_TEST_HARNESS=1"}}
+	t.Cleanup(func() { local.Close() })
+	reg := controller.NewRegistry()
+	if err := reg.Register(testHarnessID, &executor.Harness{Executor: local, AgentID: testHarnessID}, controller.RecoveryFull); err != nil {
+		t.Fatal(err)
+	}
+	reg.DeclareTools(testHarnessID, map[string]toolledger.Class{"charge_card": toolledger.Idempotent})
+	c, err := controller.New(context.Background(), controller.Config{
+		Registry:        reg,
+		EventLogBuilder: func() (eventlog.EventLog, error) { return log, nil },
+		Ledger:          ledger, Lease: leases, OwnerID: "test-" + uuid.NewString(), LeaseTTL: 2 * time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { c.Close() })
+	return c, db
 }

@@ -19,13 +19,19 @@ import (
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 )
 
-const defaultEndpoint = "telemetry.googleapis.com"
+// defaultEndpoint is a local OTLP collector. Upstream defaulted to Google
+// Cloud Trace, which sent an out-of-the-box install's traces to Google
+// (ARCHITECTURE.md §7.1).
+const defaultEndpoint = "localhost:4317"
+
+// gcpEndpoint is Google Cloud Trace, used only when configured explicitly.
+const gcpEndpoint = "telemetry.googleapis.com"
 
 // gcpTelemetryOpts returns the OTLP options for Google Cloud Trace if the endpoint
 // matches the Google Cloud Trace endpoint. It returns the options and a boolean
 // indicating if the endpoint was matched.
 func gcpTelemetryOpts(endpoint string) ([]otlptracegrpc.Option, bool) {
-	if endpoint == defaultEndpoint || endpoint == defaultEndpoint+":443" {
+	if endpoint == gcpEndpoint || endpoint == gcpEndpoint+":443" {
 		return []otlptracegrpc.Option{telemetry.WithGCPCredentials()}, true
 	}
 	return nil, false

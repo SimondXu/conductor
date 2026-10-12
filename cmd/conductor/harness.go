@@ -37,8 +37,10 @@ import (
 	"github.com/simondxu/conductor/internal/harness/fake"
 	"github.com/simondxu/conductor/internal/harness/remote"
 	"github.com/simondxu/conductor/internal/pythonsidecar"
+	"github.com/simondxu/conductor/internal/telemetry"
 	"github.com/simondxu/conductor/proto"
 	"github.com/spf13/cobra"
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/health"
@@ -221,7 +223,12 @@ func runFakeHarness(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	srv := grpc.NewServer()
+	shutdown, err := telemetry.FromEnv(ctx, "fake-harness")
+	if err != nil {
+		return err
+	}
+	defer shutdown(context.Background())
+	srv := grpc.NewServer(grpc.StatsHandler(otelgrpc.NewServerHandler()))
 	proto.RegisterHarnessServiceServer(srv, remote.NewServer(fake.New(effects)))
 	hs := health.NewServer()
 	hs.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)

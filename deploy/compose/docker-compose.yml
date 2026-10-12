@@ -14,9 +14,9 @@
 
 # Local Conductor stack, zero API keys:
 #   docker compose -f deploy/compose/docker-compose.yml up --build
-# Host ports default to 5432, 50053, 8494, 9090 and 3000; override any of them
-# with POSTGRES_PORT, FAKE_HARNESS_PORT, CONDUCTOR_PORT, PROMETHEUS_PORT or
-# GRAFANA_PORT. Then
+# Host ports default to 5432, 50053, 8494, 9090, 3000 and 16686; override any of
+# them with POSTGRES_PORT, FAKE_HARNESS_PORT, CONDUCTOR_PORT, PROMETHEUS_PORT,
+# GRAFANA_PORT or JAEGER_PORT. Then
 #   docker compose -f deploy/compose/docker-compose.yml exec conductor \
 #     conductor run --server localhost:8494 --input "book me a flight"
 
@@ -28,6 +28,8 @@ x-conductor-image: &conductor-image
 
 x-dsn: &dsn
   CONDUCTOR_DSN: postgres://conductor:conductor@postgres:5432/conductor?sslmode=disable
+  # Clients and harnesses export spans here; serve reads conductor.yaml.
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
 
 # Three controller replicas share the database (PRD M7). Only the first
 # publishes a host port; the others take over runs whose owner dies.
@@ -64,6 +66,7 @@ services:
     ports: ["${FAKE_HARNESS_PORT:-50053}:50053"]
     depends_on:
       postgres: {condition: service_healthy}
+      jaeger: {condition: service_started}
 
   conductor:
     <<: *conductor-replica
@@ -73,6 +76,7 @@ services:
     depends_on:
       postgres: {condition: service_healthy}
       fake-harness: {condition: service_started}
+      jaeger: {condition: service_started}
 
   conductor-2:
     <<: *conductor-replica
@@ -85,6 +89,11 @@ services:
     command: ["conductor", "serve", "--drain-timeout", "2s"]
     depends_on:
       conductor: {condition: service_healthy}
+
+  # Traces (ARCHITECTURE.md §7.1): OTLP in, UI on :16686.
+  jaeger:
+    image: jaegertracing/jaeger:2.10.0
+    ports: ["${JAEGER_PORT:-16686}:16686"]
 
   prometheus:
     image: prom/prometheus:v3.5.0
