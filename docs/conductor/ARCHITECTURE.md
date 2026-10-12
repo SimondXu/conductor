@@ -1043,3 +1043,15 @@ It takes the conversation's lease for the write: it is fenced like any other
 write, and refused while a controller owns the conversation. The run stays
 failed. `--settle` accepts a unique prefix of the call_id, because `tools`
 prints call ids shortened.
+
+**As built: SQLite and `serve` flags.** On SQLite no lease is constructed at
+all, rather than one whose `Acquire` returns `ErrUnsupported`. There is no
+`--single-process` flag: a single process is the only mode SQLite has.
+- `serve` logs a warning on SQLite.
+- `serve` refuses to start when `CONDUCTOR_REPLICAS > 1` and the event log
+  is SQLite.
+- `doctor --config` prints `ownership=postgres-lease` or
+  `ownership=process-local`.
+- `serve` takes PRD §5's `--owner-id` and `--lease-ttl`, which override
+  `eventlog.postgres.owner_id` and `lease_ttl`, and `--recovery-interval`
+  and `--recovery-concurrency`.

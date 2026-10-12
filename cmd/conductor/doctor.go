@@ -46,12 +46,28 @@ var doctorCmd = &cobra.Command{
 	SilenceUsage: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		printStatus(os.Stdout, doctorEndpoint)
+		cfg, err := newConfig(cmd, doctorConfigFile)
+		if err != nil {
+			return err
+		}
+		fmt.Println(ownership(cfg.EventLog.PostgresConfig.DSN))
 		return nil
 	},
 }
 
+var doctorConfigFile string
+
+// ownership is doctor's ownership line (PRD.md §6.4).
+func ownership(postgresDSN string) string {
+	if postgresDSN != "" {
+		return "ownership=postgres-lease (fenced; multi-replica safe)"
+	}
+	return "ownership=process-local (SQLite: single process only, no recovery)"
+}
+
 func init() {
 	doctorCmd.Flags().StringVar(&doctorEndpoint, "endpoint", "127.0.0.1:50053", "Harness gRPC endpoint to monitor")
+	doctorCmd.Flags().StringVar(&doctorConfigFile, "config", defaultConfigFile, "Path to YAML configuration file")
 }
 
 // Stats holds the sampled metrics and state of the AX system.

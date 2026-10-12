@@ -252,8 +252,11 @@ func NewControllerFromConfig(ctx context.Context, cfg *Config) (*controller.Cont
 		if leases, err = lease.OpenPostgres(dsn); err != nil {
 			return nil, err
 		}
-		host, _ := os.Hostname()
-		ownerID = fmt.Sprintf("%s/%d/%s", host, os.Getpid(), uuid.NewString()[:8])
+		ownerID = cfg.EventLog.PostgresConfig.OwnerID
+		if ownerID == "" {
+			host, _ := os.Hostname()
+			ownerID = fmt.Sprintf("%s/%d/%s", host, os.Getpid(), uuid.NewString()[:8])
+		}
 	}
 
 	return controller.New(ctx, controller.Config{
