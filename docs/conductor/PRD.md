@@ -8,9 +8,9 @@
 Module: `github.com/simondxu/conductor` · Fork of
 [`google/ax`](https://github.com/google/ax) (Apache-2.0) pinned at `b777313`.
 
-Every number in this document is a placeholder of the form `<...>`. No
-benchmark result in here has been measured. Values are filled in only by a
-reproducible run of `make bench` (§8).
+Values of the form `<...>` are placeholders. The only measured benchmark
+numbers are in §8.3, from one run of `make bench`; other measured values are
+marked "As built" and name the test or run they come from.
 
 ---
 
@@ -770,7 +770,7 @@ reported separately from the deterministic table, never mixed into it.
   effects table the fake harness writes, not by inspection.
 - `make bench` writes both a human table to stdout and `results.json` to
   `bench/results/<timestamp>/`, so results are diffable across commits.
-- Nothing below has been measured. Every `<...>` is a placeholder.
+- §8.2 is the output's shape, with placeholders; §8.3 is a measured run.
 
 ### 8.2 Table shape
 
@@ -859,6 +859,68 @@ RESULT: <PASS|FAIL>   (<int> invariant violations, <int> duplicate effects)
 zero. Recovery rate below 100% is reported, not hidden, and does not by itself
 fail the run — a `RECONCILABLE` call whose fake external system was deliberately
 kept unreachable is a correct `ABANDONED`, not a bug.
+
+### 8.3 Measured run [as built]
+
+One run of `make bench` with its defaults, on an Apple M4 Pro (14 cores, 48 GB)
+with Docker 28.3 running native arm64 images. It is one run, not an average,
+and every value below comes from its `results.json` by script. Read two
+columns carefully:
+
+- **Injection to run end** is the time from the injected failure until the
+  run left `PENDING`. It includes the rest of the run's work and the
+  restart of whatever was killed, so it is not a takeover latency. For
+  example, after a graceful kill the takeover starts about 0.1 s after the
+  release, and the 6.2 s is mostly the 2 s drain plus
+  re-running the fake's 4 s charge plus the email (ARCHITECTURE
+  "Graceful handover").
+- **Recovered** counts a run that ended `FAILED` as recovered, since an
+  `UNSAFE` call with an unknown outcome fails its run by design. The
+  COMPLETED / FAILED column shows how each run ended.
+
+- **Run:** commit `6db5fbd` (dirty: no; merged to `main` as `e215e72` with an identical tree), started 2026-10-12T01:00:00, took 245 s.
+- **Setup:** PostgreSQL 17.11, 3 controller replicas, executor: none: fixed harness endpoint (compose), harness: fake (deterministic).
+- **Load:** 8 concurrent sessions for 60 s, 3 turns and 2 tool calls per session.
+
+| Load | Value |
+|---|---|
+| sessions started / completed / failed | 4628 / 4628 / 0 |
+| throughput | 4621 sessions/min |
+| turn latency p50 / p95 / p99 | 33 / 45 / 54 ms |
+| run latency p50 / p95 / p99 | 101 / 127 / 149 ms |
+| error rate | 0 % |
+
+| Failure class | Injected | Recovered | Ended COMPLETED / FAILED | Injection to run end, p50 / p95 / p99 |
+|---|---|---|---|---|
+| `controller_kill_graceful` | 3 | 3 | 3 / 0 | 6188 / 6196 / 6196 ms |
+| `controller_kill_sigkill` | 3 | 3 | 3 / 0 | 9873 / 12874 / 12874 ms |
+| `harness_kill` | 3 | 3 | 3 / 0 | 1349 / 1357 / 1357 ms |
+| `db_unavailable_on_append` | 3 | 3 | 3 / 0 | 10280 / 10301 / 10301 ms |
+| `duplicate_concurrent_req` | 3 | 3 | 3 / 0 | 4055 / 4057 / 4057 ms |
+| `rolling_restart` | 9 | 9 | 9 / 0 | 6224 / 8750 / 8750 ms |
+| **total** | 24 | 24 | 24 / 0 | 6196 / 10301 / 12874 ms |
+
+| Invariant | Checks | Violations |
+|---|---|---|
+| I1: every STARTED call reached a settled state | 27813 | 0 |
+| I1b: no run COMPLETED with an unsettled call | 4652 | 0 |
+| I2: no extra effect per idempotency_key (IDEMPOTENT) | 27792 | 0 |
+| I3': generation non-decreasing by step, per conversation | 4652 | 0 |
+| I4: stale-generation write rejected | 4649 | 0 |
+| I5: conversation_log.step contiguous from 1 | 4652 | 0 |
+| I6: rebuild(log) == post-recovery state | 4652 | 0 |
+| I7a: runs projection == rebuild from log | 4652 | 0 |
+| I7b: tool_calls terminal states consistent with log | 27813 | 0 |
+| I11: a model turn is logged whole, as one event | 4652 | 0 |
+
+- **Tool ledger:** `charge_card` (IDEMPOTENT): 27792 calls, 27816 attempts, 21 outcome-unknown, 21 reconciled, 0 abandoned; `send_email` (UNSAFE): 21 calls, 21 attempts, 0 outcome-unknown, 0 reconciled, 0 abandoned.
+- **Ownership:** 13975 lease acquisitions, 19 contended, 3 losses (all `renew_timeout`), 1 fenced write(s) rejected, max generation 3.
+- **Event log:** 83466 events appended, 42 replayed in recovery (p95 2 per recovery), 0 lost.
+- **Duplicate effects:** 0. **Invariant violations:** 0. **Recoveries abandoned:** 0. **I8:** 21 `UNSAFE` tool turns allowed, 0 deferred. **Result:** PASS.
+
+No failure class kills the controller inside a model turn, so I11's row shows
+that turns are logged whole under load; recovery from that crash is covered by
+`TestRecover_CrashMidModelTurnRerunsTheTurn`.
 
 ---
 

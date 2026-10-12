@@ -652,7 +652,7 @@ harness/model-agnostic and a maintainer can refute the claim in one line.
 
 ---
 
-## 9. Resume bullets (numbers are placeholders until block ⑥ runs)
+## 9. Resume bullets (numbers from the `make bench` run in PRD §8.3)
 
 Structure: correctness/durability → distributed ownership + Kubernetes →
 observability + benchmark. Vocabulary drawn from real 2026 postings (Amazon
@@ -669,20 +669,20 @@ Kubernetes, OpenTelemetry)*
   persisted tool-call lifecycle with stable IDs, argument-hash idempotency keys,
   and per-attempt state, then implemented event-sourced recovery so restarted
   controllers resume long-running agent sessions without losing or duplicating
-  tool effects — **X% recovery across N runs and 8 injected failure boundaries,
-  0 duplicate effects on idempotent tools**.
+  tool effects — **24 of 24 injected failures recovered across
+  6 failure classes, 0 duplicate effects over 27,792 idempotent tool calls**.
 - Implemented distributed session ownership with PostgreSQL leases and fencing
   tokens, preserving single-writer consistency across M controller replicas
   through pod deletion, failover, and rolling updates; replaced the
   Substrate-only compute path with a plain-Kubernetes executor owning Pod
-  lifecycle, readiness, and graceful drain — **session continuity X%, p95
-  recovery latency Y ms**.
+  lifecycle, readiness, and graceful drain — **in the compose benchmark,
+  24/24 sessions finished after controller, harness and database failures
+  across 3 replicas, p95 10.3 s from failure to finished session**.
 - Made the runtime operable: extended trace-only telemetry into a full
   observability stack with Prometheus metrics and end-to-end distributed tracing
   across client → controller → executor → model → tool → event log, and shipped
-  a reproducible chaos/load benchmark reporting **throughput, p50/p95/p99
-  latency, recovery success rate, and duplicate-effect counts at N concurrent
-  sessions**.
+  a reproducible chaos/load benchmark reporting **4,628 sessions in 60 s at
+  8 concurrent, run latency p99 149 ms, 0 failures**.
 
 Never write "exactly-once tool execution".
 
