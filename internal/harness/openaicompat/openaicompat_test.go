@@ -26,12 +26,15 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	dto "github.com/prometheus/client_model/go"
 
 	"github.com/simondxu/conductor/internal/controller"
 	"github.com/simondxu/conductor/internal/controller/eventlog"
 	"github.com/simondxu/conductor/internal/controller/eventlog/eventlogtest"
 	"github.com/simondxu/conductor/internal/harness/harnesstest"
+	"github.com/simondxu/conductor/internal/harness/ownedloop"
 	"github.com/simondxu/conductor/proto"
 )
 
@@ -178,7 +181,7 @@ func tokens(t *testing.T, cfg Config, kind string) float64 {
 	t.Helper()
 	u, _ := url.Parse(cfg.BaseURL)
 	m := &dto.Metric{}
-	if err := modelTokens.WithLabelValues(u.Host, cfg.Model, kind).Write(m); err != nil {
+	if err := ownedloop.ModelTokens.WithLabelValues(u.Host, cfg.Model, kind).Write(m); err != nil {
 		t.Fatal(err)
 	}
 	return m.GetCounter().GetValue()
@@ -259,6 +262,17 @@ func TestOwnedLoop_ParallelToolCalls(t *testing.T) {
 
 	if p, c := tokens(t, r.cfg, "prompt"), tokens(t, r.cfg, "completion"); p != 20 || c != 10 {
 		t.Errorf("tokens = %v prompt, %v completion; want 20, 10", p, c)
+	}
+	u, _ := url.Parse(r.cfg.BaseURL)
+	if n := testutil.ToFloat64(ownedloop.ModelCalls.WithLabelValues(u.Host, r.cfg.Model)); n != 2 {
+		t.Errorf("model calls = %v, want 2", n)
+	}
+	m := &dto.Metric{}
+	if err := ownedloop.ModelDuration.WithLabelValues(u.Host, r.cfg.Model).(prometheus.Histogram).Write(m); err != nil {
+		t.Fatal(err)
+	}
+	if n := m.GetHistogram().GetSampleCount(); n != 2 {
+		t.Errorf("model duration samples = %v, want 2", n)
 	}
 }
 

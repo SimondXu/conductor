@@ -65,7 +65,7 @@ sys.exit(1)' "$conv"; then
 done
 [[ -n "$trace_ok" ]] || fail "no complete trace for $conv in Jaeger"
 panels=$(curl -sf "http://localhost:${GRAFANA_PORT:-3000}/api/dashboards/uid/conductor-runtime" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["dashboard"]["panels"]))')
-[[ "$panels" == "15" ]] || fail "Grafana dashboard has '$panels' panels, want 15"
+[[ "$panels" == "16" ]] || fail "Grafana dashboard has '$panels' panels, want 16"
 
 # until <seconds> <sql> <want>: poll psql until it prints want.
 until_eq() {
