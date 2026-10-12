@@ -1136,7 +1136,9 @@ all, rather than one whose `Acquire` returns `ErrUnsupported`. There is no
 - `serve` refuses to start when `CONDUCTOR_REPLICAS > 1` and the event log
   is SQLite.
 - `doctor --config` prints `ownership=postgres-lease` or
-  `ownership=process-local`.
+  `ownership=process-local`. It also prints one `recovery=` line per
+  configured harness (PRD §6.5), from the config alone, without starting
+  any harness.
 - `serve` takes PRD §5's `--owner-id` and `--lease-ttl`, which override
   `eventlog.postgres.owner_id` and `lease_ttl`, and `--recovery-interval`
   and `--recovery-concurrency`.
