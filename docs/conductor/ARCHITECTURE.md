@@ -913,6 +913,36 @@ after logging `chaos.kill`. Where each fires:
 `TestChaosBoundaries` checks what the ledger and the effects show at each
 point.
 
+**As built [M9] (`conductor chaos run`, `internal/bench`).** It drives the
+compose stack from the host: containers through the docker compose CLI, runs
+over gRPC to each replica's published port (8494–8496), outcomes and
+invariants in PostgreSQL. Each injection is a new conversation running a
+fake script whose `IDEMPOTENT` charge takes 4 s, longer than the 2 s drain
+and than a renewal period of the stack's 5 s lease; then an `UNSAFE` email.
+After each repeat, `internal/invariant` checks that repeat's conversations.
+
+| Class | Injection | Measured from |
+|---|---|---|
+| `controller_kill_sigkill` | `conductor` is recreated with `CONDUCTOR_CHAOS_KILL_AT` (default `tool_started:charge_card`) and dies there; it is started again, still armed, after each run, and disarmed at the end | the container exiting |
+| `controller_kill_graceful` | SIGTERM to the owner while the charge runs | the signal |
+| `harness_kill` | the script's `crash_after_effect`; compose restarts the harness | the client's stream breaking |
+| `db_unavailable_on_append` | `docker compose pause postgres` for 6 s while the charge runs, longer than the lease, so the result append and every renewal block and the owner loses the lease. A pause, not a stop: connections hang as on a partition instead of failing fast | the pause |
+| `duplicate_concurrent_req` | the same conversation sent to two replicas at once; exactly one client may succeed | the send |
+| `rolling_restart` | each replica in turn gets a run, then `docker compose restart` once its charge has started | its restart |
+
+"Recovered" is the run leaving `PENDING` within 90 s; `FAILED` counts, since
+an `UNSAFE` call cut off mid-flight fails the run by design.
+
+Measured on a laptop, one injection each: SIGKILL recovers in 4.5–12.5 s
+across all seven controller boundaries; graceful in 6.5–10.4 s. **Graceful
+handover is not sub-second**, as §8.1 expected: the released run waits for
+another replica's next reconciler pass (5 s interval plus jitter), then
+re-runs the 4 s charge. Nothing yet tells the other replicas that a lease was
+released.
+
+Not built from PRD §5's flag list: `--target` (the class decides),
+`--conversation` and `--assert` (every invariant is always checked).
+
 ### 8.2 Detecting duplicate effects mechanically
 
 `fake` appends every side effect to `fake_effects`; a duplicate is more than one

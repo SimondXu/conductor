@@ -69,15 +69,24 @@ func init() {
 // function it exits with. The environment arms it at startup; tests call
 // Arm directly.
 func Arm(spec string, exitFunc func(int)) error {
-	at, tool, _ := strings.Cut(spec, ":")
-	if at != "" && !slices.Contains(Boundaries, at) {
-		return fmt.Errorf("%s=%q: unknown boundary %q, want one of %s", Env, spec, at, strings.Join(Boundaries, ", "))
-	}
-	if tool != "" && !strings.HasPrefix(at, "tool_") {
-		return fmt.Errorf("%s=%q: only the tool_* boundaries take a tool name", Env, spec)
+	at, tool, err := Parse(spec)
+	if err != nil {
+		return err
 	}
 	armed.Store(&arming{at: at, tool: tool, exit: exitFunc})
 	return nil
+}
+
+// Parse splits spec, <boundary>[:<tool>], and checks it.
+func Parse(spec string) (boundary, tool string, err error) {
+	at, tool, _ := strings.Cut(spec, ":")
+	if at != "" && !slices.Contains(Boundaries, at) {
+		return "", "", fmt.Errorf("%s=%q: unknown boundary %q, want one of %s", Env, spec, at, strings.Join(Boundaries, ", "))
+	}
+	if tool != "" && !strings.HasPrefix(at, "tool_") {
+		return "", "", fmt.Errorf("%s=%q: only the tool_* boundaries take a tool name", Env, spec)
+	}
+	return at, tool, nil
 }
 
 // At exits the process if the hook is armed for boundary and, when the
