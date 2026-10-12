@@ -29,6 +29,7 @@ import (
 	"github.com/simondxu/conductor/internal/controller/eventlog"
 	"github.com/simondxu/conductor/internal/controller/lease"
 	"github.com/simondxu/conductor/internal/controller/toolledger"
+	"github.com/simondxu/conductor/internal/executor"
 	"github.com/simondxu/conductor/internal/harness"
 	"github.com/simondxu/conductor/internal/telemetry"
 	"github.com/simondxu/conductor/proto"
@@ -133,6 +134,7 @@ func (d *Controller) exec(ctx context.Context, req *proto.CreateInteractionEvent
 	}
 	defer release()
 	ctx = telemetry.WithLogAttrs(ctx, slog.Int64("generation", gen))
+	ctx = executor.WithGeneration(ctx, gen)
 
 	// TODO(jbd): Resume an incomplete execution if there exists one.
 	// TODO(jbd): Enable bringing a remote harness that implements HarnessService.

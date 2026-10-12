@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/simondxu/conductor/internal/config"
@@ -25,6 +26,7 @@ import (
 	"github.com/simondxu/conductor/internal/controller/eventlog"
 	"github.com/simondxu/conductor/internal/controller/lease"
 	"github.com/simondxu/conductor/internal/controller/toolledger"
+	"github.com/simondxu/conductor/internal/executor"
 	"github.com/simondxu/conductor/internal/harness"
 	"github.com/simondxu/conductor/internal/harness/antigravity"
 	"github.com/simondxu/conductor/internal/harness/antigravityinteractions"
@@ -34,6 +36,8 @@ import (
 	"github.com/simondxu/conductor/internal/skills"
 	"github.com/simondxu/conductor/internal/skills/geminienterprise"
 	"github.com/simondxu/conductor/internal/skills/local"
+	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
+	"k8s.io/client-go/rest"
 )
 
 // Controller is the active controller type for this build.
@@ -274,6 +278,20 @@ func NewControllerFromConfig(ctx context.Context, cfg *Config) (*controller.Cont
 // newFakeHarness builds the fake harness: a client of a remote
 // `conductor harness fake` when Endpoint is set, in-process otherwise.
 func newFakeHarness(ctx context.Context, c config.FakeHarnessConfig) (harness.Harness, error) {
+	if c.Executor == "pod" {
+		return newPodHarness(c.Pod)
+	}
+	if c.Executor == "local" {
+		exe, err := os.Executable()
+		if err != nil {
+			return nil, err
+		}
+		cmd := []string{exe, "harness", "fake"}
+		if c.EffectsDSN != "" {
+			cmd = append(cmd, "--effects-dsn", os.ExpandEnv(c.EffectsDSN))
+		}
+		return &executor.Harness{Executor: &executor.Local{Command: cmd}, AgentID: config.FakeHarnessID}, nil
+	}
 	if c.Endpoint != "" {
 		return remote.NewHarness(c.Endpoint, config.FakeHarnessID)
 	}
@@ -285,4 +303,35 @@ func newFakeHarness(ctx context.Context, c config.FakeHarnessConfig) (harness.Ha
 		return nil, err
 	}
 	return fake.New(effects), nil
+}
+
+// newPodHarness runs each fake execution in its own pod. It uses the
+// in-cluster service account: the controller dials the pods' IPs.
+func newPodHarness(c config.PodExecutorConfig) (harness.Harness, error) {
+	rc, err := rest.InClusterConfig()
+	if err != nil {
+		return nil, fmt.Errorf("pod executor needs to run in a cluster: %w", err)
+	}
+	cs, err := corev1client.NewForConfig(rc)
+	if err != nil {
+		return nil, err
+	}
+	ns := c.Namespace
+	if ns == "" {
+		b, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
+		if err != nil {
+			return nil, fmt.Errorf("pod executor namespace: %w", err)
+		}
+		ns = strings.TrimSpace(string(b))
+	}
+	grace := c.GracePeriodSeconds
+	if grace == 0 {
+		grace = 5
+	}
+	cmd := []string{"conductor", "harness", "fake"}
+	if c.Secret != "" {
+		cmd = append(cmd, "--effects-dsn", "$(CONDUCTOR_DSN)") // expanded by the kubelet
+	}
+	p := &executor.Pod{Client: cs, Namespace: ns, Image: c.Image, Command: cmd, Port: 50053, EnvFrom: c.Secret, GracePeriod: grace}
+	return &executor.Harness{Executor: p, AgentID: config.FakeHarnessID}, nil
 }
