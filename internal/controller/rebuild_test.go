@@ -23,11 +23,15 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	gproto "google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/structpb"
 
+	"github.com/simondxu/conductor/internal/controller/eventlog"
 	"github.com/simondxu/conductor/internal/controller/eventlog/eventlogtest"
+	"github.com/simondxu/conductor/internal/controller/toolledger"
 	"github.com/simondxu/conductor/internal/harness"
+	"github.com/simondxu/conductor/internal/harness/fake"
 	"github.com/simondxu/conductor/internal/harness/harnesstest"
 	"github.com/simondxu/conductor/proto"
 )
@@ -83,7 +87,7 @@ func TestRebuildIsPure(t *testing.T) {
 func TestPostRecoveryStateEqualsRebuilt(t *testing.T) {
 	var recovered atomic.Bool
 	var log *eventlogtest.MemoryEventLog
-	rec := &rebuiltChecker{log: func() *eventlogtest.MemoryEventLog { return log }}
+	rec := &rebuiltChecker{log: func() eventlog.EventLog { return log }}
 	r := newLedgerRig(t, func(h harness.Harness) harness.Harness {
 		rec.Harness = crashingHarness{h, &recovered, false}
 		return rec
@@ -113,7 +117,7 @@ func TestPostRecoveryStateEqualsRebuilt(t *testing.T) {
 // conversation's log rebuilt at the moment the turn runs.
 type rebuiltChecker struct {
 	harness.Harness
-	log  func() *eventlogtest.MemoryEventLog
+	log  func() eventlog.EventLog
 	conv string
 
 	mu         sync.Mutex
@@ -154,10 +158,111 @@ func (e *checkedExecution) Run(ctx context.Context, h harness.Handler) error {
 	}
 	e.c.mu.Lock()
 	e.c.runs++
-	if !slices.EqualFunc(e.queued, st.History, func(a, b *proto.Step) bool { return gproto.Equal(a, b) }) {
+	if !slices.EqualFunc(e.queued, st.History, sameStep) {
 		e.c.mismatches = append(e.c.mismatches, fmt.Sprintf("turn %d queued %d steps, the log rebuilds to %d", e.c.runs, len(e.queued), len(st.History)))
 	}
 	e.c.mu.Unlock()
 	e.queued = nil
 	return e.Execution.Run(ctx, h)
+}
+
+// The replay snapshot: for every cut point k, the fold of the first k events,
+// stored and read back as binary protobuf, followed by the rest, rebuilds to
+// the state the whole log rebuilds to. The log is a real three-turn run.
+func TestFoldRebuildsTheSameState(t *testing.T) {
+	r := newLedgerRig(t, nil)
+	for i := range 3 { // a different agent_config each turn: the last one wins
+		if err := r.exec(fmt.Sprintf(`{"turns":[{"tool_calls":[{"name":"charge_card"}]},{"content":"done %d"}],"tools":{"charge_card":{"idempotent":true}}}`, i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	events, err := r.log.Events(context.Background(), r.conv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := rebuild(events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(want.AgentConfig, []byte("done 2")) {
+		t.Fatalf("the log rebuilds to agent_config %s, want the last turn's", want.AgentConfig)
+	}
+	for k := 0; k <= len(events); k++ {
+		data, err := gproto.Marshal(fold(r.conv, events[:k]))
+		if err != nil {
+			t.Fatal(err)
+		}
+		snap := &proto.StepEvent{}
+		if err := gproto.Unmarshal(data, snap); err != nil {
+			t.Fatal(err)
+		}
+		got, err := rebuild(append([]*proto.StepEvent{snap}, events[k:]...))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.State != want.State || got.HarnessID != want.HarnessID || !bytes.Equal(got.AgentConfig, want.AgentConfig) ||
+			!slices.EqualFunc(got.History, want.History, func(a, b *proto.Step) bool { return gproto.Equal(a, b) }) {
+			t.Fatalf("snapshot after %d of %d events rebuilds to %v %q %d steps, the log to %v %q %d steps",
+				k, len(events), got.State, got.HarnessID, len(got.History), want.State, want.HarnessID, len(want.History))
+		}
+	}
+}
+
+// Replay reads only the tail after the latest snapshot, however long the
+// conversation grows, and every turn still runs on exactly the history the
+// whole log rebuilds to.
+func TestReplay_ReadsOnlyTheTailAfterASnapshot(t *testing.T) {
+	var r *recRig
+	rec := &rebuiltChecker{log: func() eventlog.EventLog { return r.log }}
+	r = newRecRig(t, func(reg *Registry, effects *fake.MemoryEffects) {
+		rec.Harness = fake.New(effects)
+		if err := reg.Register("fake", rec, RecoveryFull); err != nil {
+			t.Fatal(err)
+		}
+		reg.DeclareTools("fake", map[string]toolledger.Class{"charge_card": toolledger.Idempotent})
+	})
+	rec.conv = r.conv
+	r.c.snapshotEvery = 5
+	ctx := context.Background()
+	maxRead := 0.0
+	for i := range 15 {
+		before := testutil.ToFloat64(replayEvents)
+		if err := r.c.Exec(ctx, &proto.CreateInteractionEvent{
+			ConversationId: r.conv, AgentId: "fake",
+			AgentConfig: []byte(`{"turns":[{"tool_calls":[{"name":"charge_card","args":{"n":` + fmt.Sprint(i) + `}}]},{"content":"done"}],"tools":{"charge_card":{"idempotent":true}}}`),
+			Inputs:      []*proto.Step{harnesstest.UserStep("go")},
+		}, nil); err != nil {
+			t.Fatal(err)
+		}
+		maxRead = max(maxRead, testutil.ToFloat64(replayEvents)-before)
+	}
+	events, err := r.log.Events(ctx, r.conv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	step, snap, err := r.log.(eventlog.Snapshots).Snapshot(ctx, r.conv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The snapshot is the fold of exactly the first step events.
+	fromSnap, _ := rebuild([]*proto.StepEvent{snap})
+	fromLog, _ := rebuild(events[:min(int(step), len(events))])
+	if fromSnap.State != fromLog.State || !slices.EqualFunc(fromSnap.History, fromLog.History, sameStep) {
+		t.Fatalf("snapshot labelled step %d rebuilds to %v with %d steps, the log's first %d events to %v with %d",
+			step, fromSnap.State, len(fromSnap.History), step, fromLog.State, len(fromLog.History))
+	}
+	if maxRead > 10 || len(events) < 70 || step < int64(len(events))-10 {
+		t.Fatalf("an Exec read up to %v events of %d, latest snapshot at step %d; want at most 10 and a recent snapshot", maxRead, len(events), step)
+	}
+	if rec.turns() == 0 || len(rec.mismatches) > 0 {
+		t.Fatalf("%d turns, mismatches: %v", rec.turns(), rec.mismatches)
+	}
+}
+
+// sameStep compares two steps but for Index, which the live path sets on a
+// step after logging it, so a log read back from PostgreSQL never has it.
+func sameStep(a, b *proto.Step) bool {
+	a, b = gproto.Clone(a).(*proto.Step), gproto.Clone(b).(*proto.Step)
+	a.Index, b.Index = 0, 0
+	return gproto.Equal(a, b)
 }

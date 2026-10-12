@@ -57,7 +57,10 @@ type Controller struct {
 	// an UNSAFE call needs left before it starts (I8). There is no tool
 	// timeout yet, so it is one renewal period.
 	unsafeBudget time.Duration
-	active       sync.WaitGroup // Exec calls in progress
+	// snapshotEvery is how many events a replay reads after the latest
+	// snapshot before it saves a new one.
+	snapshotEvery int
+	active        sync.WaitGroup // Exec calls in progress
 }
 
 // Config configures the controller.
@@ -76,6 +79,10 @@ type Config struct {
 	// LeaseTTL defaults to DefaultLeaseTTL.
 	LeaseTTL time.Duration
 }
+
+// defaultSnapshotEvery bounds replay: at most this many events, plus those
+// of the current turn, after the latest snapshot.
+const defaultSnapshotEvery = 100
 
 // DefaultLeaseTTL is the lease ttl; holders renew at a third of it
 // (ARCHITECTURE.md §10).
@@ -106,13 +113,14 @@ func New(ctx context.Context, cfg Config) (*Controller, error) {
 		ttl = DefaultLeaseTTL
 	}
 	return &Controller{
-		registry:     cfg.Registry,
-		eventLog:     eventLog,
-		ledger:       cfg.Ledger,
-		lease:        cfg.Lease,
-		ownerID:      ownerID,
-		leaseTTL:     ttl,
-		unsafeBudget: ttl / 3, // the renewal period
+		registry:      cfg.Registry,
+		eventLog:      eventLog,
+		ledger:        cfg.Ledger,
+		lease:         cfg.Lease,
+		ownerID:       ownerID,
+		leaseTTL:      ttl,
+		unsafeBudget:  ttl / 3, // the renewal period
+		snapshotEvery: defaultSnapshotEvery,
 	}, nil
 }
 
@@ -155,12 +163,12 @@ func (d *Controller) exec(ctx context.Context, req *proto.CreateInteractionEvent
 	// Adding harness registration support temporarily.
 	l := newLogger(d.eventLog, req.ConversationId, req.AgentId)
 	l.gen = gen
-	st, events, err := d.replay(ctx, req.ConversationId)
+	st, read, err := d.replay(ctx, req.ConversationId)
 	if err != nil {
 		return err
 	}
 	if len(req.Inputs) == 0 {
-		slog.InfoContext(ctx, "recovery.rebuild", slog.Int("events", len(events)),
+		slog.InfoContext(ctx, "recovery.rebuild", slog.Int("events", read),
 			slog.Int("steps", len(st.History)), slog.String("state", st.State.String()))
 	}
 	state, storedHarnessID := st.State, st.HarnessID
@@ -236,19 +244,41 @@ func (d *Controller) exec(ctx context.Context, req *proto.CreateInteractionEvent
 	return nil
 }
 
-// replay reads the conversation's events and rebuilds its state.
-func (d *Controller) replay(ctx context.Context, conversationID string) (st runState, events []*proto.StepEvent, err error) {
+// replay rebuilds the conversation's state from its latest snapshot and the
+// events after it, and returns how many events it read. When that tail
+// reaches snapshotEvery, it saves a new snapshot. A snapshot is only a
+// cache: one that cannot be read or saved costs a full replay, nothing
+// more.
+func (d *Controller) replay(ctx context.Context, conversationID string) (st runState, read int, err error) {
 	ctx, span := tracer.Start(ctx, "replay")
 	defer func() { endSpan(span, err) }()
-	if events, err = d.eventLog.Events(ctx, conversationID); err != nil {
-		return st, nil, fmt.Errorf("failed to check resumption state: %w", err)
+	var from int64
+	var events []*proto.StepEvent
+	snaps, _ := d.eventLog.(eventlog.Snapshots)
+	if snaps != nil {
+		step, folded, err := snaps.Snapshot(ctx, conversationID)
+		if err != nil {
+			slog.WarnContext(ctx, "Replaying the whole log: snapshot unreadable", slog.Any("error", err))
+		} else if folded != nil {
+			from, events = step, []*proto.StepEvent{folded}
+		}
 	}
-	replayEvents.Add(float64(len(events)))
-	span.SetAttributes(attribute.Int("events", len(events)))
+	tail, err := d.eventLog.EventsSince(ctx, conversationID, from)
+	if err != nil {
+		return st, 0, fmt.Errorf("failed to check resumption state: %w", err)
+	}
+	events = append(events, tail...)
+	replayEvents.Add(float64(len(tail)))
+	span.SetAttributes(attribute.Int("events", len(tail)), attribute.Int64("snapshot_step", from))
 	if st, err = rebuild(events); err != nil {
-		return st, nil, fmt.Errorf("failed to rebuild conversation %q: %w", conversationID, err)
+		return st, 0, fmt.Errorf("failed to rebuild conversation %q: %w", conversationID, err)
 	}
-	return st, events, nil
+	if snaps != nil && len(tail) >= d.snapshotEvery {
+		if err := snaps.SaveSnapshot(ctx, conversationID, from+int64(len(tail)), fold(conversationID, events)); err != nil {
+			slog.WarnContext(ctx, "Snapshot not saved", slog.Any("error", err))
+		}
+	}
+	return st, len(tail), nil
 }
 
 // own takes the conversation's lease for the duration of one Exec and returns

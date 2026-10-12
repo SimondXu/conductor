@@ -255,6 +255,18 @@ rule I6 is ambiguous.
 **Falsified by** `TestRebuildIsPure` (same events ⇒ same state, repeated and
 shuffled-batch) and `TestPostRecoveryStateEqualsRebuilt`.
 
+**With replay snapshots (P1).** Replay rebuilds from the latest snapshot plus
+the events after it. The snapshot is `fold(events[1..k])`, a single event
+that rebuilds to the same state as those k events. So I6 adds one
+obligation: for every k, `rebuild(fold(events[1..k]) ++ events[k+1..])` must
+equal `rebuild(events)`. It is falsified by:
+- `TestFoldRebuildsTheSameState`, at every cut point of a real run, through
+  a protobuf round trip;
+- `TestReplay_ReadsOnlyTheTailAfterASnapshot`, where every turn of a
+  15-turn run must queue exactly the history rebuilt from the whole log, and
+  the stored snapshot must equal the fold of exactly the steps it is
+  labelled with.
+
 ### I7a — `runs` is a pure projection
 
 > `runs` is derived entirely from `conversation_log`. Dropping and rebuilding it

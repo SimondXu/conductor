@@ -60,3 +60,24 @@ func Rebuild(events []*proto.StepEvent) (proto.State, []*proto.Step, error) {
 	st, err := rebuild(events)
 	return st.State, st.History, err
 }
+
+// fold merges events into one event that rebuilds to the same state: the
+// first harness id, the last agent_config and state, and every step in
+// order. It is the replay snapshot (PLAN.md G6): for every k,
+// rebuild(fold(events[:k]) followed by events[k:]) equals rebuild(events).
+func fold(conversationID string, events []*proto.StepEvent) *proto.StepEvent {
+	f := &proto.StepEvent{ConversationId: conversationID}
+	for _, ev := range events {
+		if f.AgentId == "" {
+			f.AgentId = ev.AgentId
+		}
+		if ev.State != proto.State_STATE_UNSPECIFIED {
+			f.State = ev.State
+		}
+		if ev.AgentConfig != nil {
+			f.AgentConfig = ev.AgentConfig
+		}
+		f.Steps = append(f.Steps, ev.Steps...)
+	}
+	return f
+}
