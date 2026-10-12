@@ -133,6 +133,19 @@ history), so tools still execute inside the execution environment and
 `harness_kill` mid-tool stays meaningful. Recovery is the same loop with history
 rebuilt from the log (§6.1).
 
+**As built: a model turn is one event (I11).** The controller holds a model
+turn's steps and appends them in one event after `Run` returns, then
+delivers them in one response; a turn whose `Run` fails logs nothing and its
+calls are not planned. Before this, each step was its own append, and a crash
+between two of them left part of a turn in the log: recovery then read a
+leading thought or preamble as the model's answer, marked the run
+`COMPLETED`, and the turn's tool calls were never made
+(`TestRecover_CrashMidModelTurnRerunsTheTurn` reproduced it). A model turn
+has no side effects, so running it again is safe. Tool turns still log each
+result on its own, because each result settles its own call (I7b). The
+chaos `event_appended` boundary always fired on the user input, so the suite
+never reached the gap.
+
 A resumed conversation whose history ends in an unanswered tool call is
 resolved from the ledger before the next turn (§6.1, "Resolving unanswered
 calls"). Without a ledger (SQLite) it is refused rather than re-executed:
@@ -353,7 +366,7 @@ Rules:
 ## 4. Correctness invariants
 
 **See `correctness.md`** — the authoritative set (I1, I1b, I2, I3/I3′, I4, I5,
-I6, I7a, I7b, I8, I9, I10), each with the query or test that falsifies it, plus
+I6, I7a, I7b, I8, I9, I10, I11), each with the query or test that falsifies it, plus
 the three guarantees Conductor explicitly does **not** make.
 
 Revision-2 changes: I3 demoted to a design property with I3′ as the assertion;
@@ -779,10 +792,10 @@ beside the inherited one: `ax.proto` follows the pinned upstream and is not
 extended, and #320's `last_seq` is not revived. `Attach(conversation_id,
 after_step)` works like this:
 
-- **What it streams.** Every logged step after `after_step`, one per
-  response with `Step.index` set to its log step. Then it polls
-  `EventsSince` every 100 ms and sends each new step, and ends when the run
-  is `COMPLETED`, `FAILED` or `CANCELED`.
+- **What it streams.** Every logged event after `after_step`, one response
+  per event with each step's `Step.index` set to the event's log step. Then
+  it polls `EventsSince` every 100 ms and sends each new event, and ends when
+  the run is `COMPLETED`, `FAILED` or `CANCELED`.
 - **Where it runs.** It reads only the log, so every step it sends is
   durable (I9), and any replica serves it, wherever the run executes. It
   takes no in-flight slot, so a client that reconnects while its old turn
@@ -795,7 +808,9 @@ after_step)` works like this:
   successful or not, retrying belongs to the reconciler and its poison
   guard.
 - **Granularity.** The unit is the log event. An event with several steps
-  (the user inputs, a failed run's error results) is sent whole.
+  (the user inputs, a model turn, a failed run's error results) is sent
+  whole, in one response, so a client's `after_step` never falls inside an
+  event (I11).
 - **Client.** `conductor run --server … --conversation <id> --resume
   --after-step N` uses Attach. A broken stream prints that command with
   the last step received.
