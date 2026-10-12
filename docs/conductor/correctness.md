@@ -292,10 +292,14 @@ SELECT t.call_id
       WHERE l.conversation_id = t.conversation_id
         AND l.payload::jsonb @> jsonb_build_object(
               'steps', jsonb_build_array(
-                jsonb_build_object('toolResult',
-                  jsonb_build_object('callId', t.call_id))))
+                jsonb_build_object('tool_result',
+                  jsonb_build_object('call_id', t.call_id))))
    );
 ```
+
+The payload is protojson with proto field names (`UseProtoNames`,
+`eventlog/eventlog.go:42`), so the keys are `tool_result` / `call_id`; the
+camelCase spelling would match nothing and report every call.
 
 ### I8 — Do not start what you cannot commit (Conductor-owned loops only)
 

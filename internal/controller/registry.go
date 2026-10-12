@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/simondxu/conductor/internal/controller/toolledger"
 	"github.com/simondxu/conductor/internal/harness"
 )
 
@@ -39,6 +40,7 @@ type Registry struct {
 	mu             sync.RWMutex
 	harnesses      map[string]harness.Harness
 	recovery       map[string]Recovery
+	tools          map[string]map[string]toolledger.Class
 	defaultHarness string
 }
 
@@ -47,6 +49,7 @@ func NewRegistry() *Registry {
 	return &Registry{
 		harnesses: make(map[string]harness.Harness),
 		recovery:  make(map[string]Recovery),
+		tools:     make(map[string]map[string]toolledger.Class),
 	}
 }
 
@@ -88,6 +91,24 @@ func (r *Registry) Harness(id string) (harness.Harness, error) {
 		return nil, fmt.Errorf("harness %s not found", id)
 	}
 	return h, nil
+}
+
+// DeclareTools records the class of each of a harness's tools.
+func (r *Registry) DeclareTools(id string, classes map[string]toolledger.Class) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.tools[id] = classes
+}
+
+// ToolClass returns a tool's declared class. An undeclared tool is UNSAFE:
+// classes are never inferred, and that is the only safe assumption.
+func (r *Registry) ToolClass(id, tool string) toolledger.Class {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if c, ok := r.tools[id][tool]; ok {
+		return c
+	}
+	return toolledger.Unsafe
 }
 
 // SetDefaultHarness marks a registered harness id as the default.

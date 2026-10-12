@@ -1,0 +1,172 @@
+// Copyright 2026 Simon Xu
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package toolledger
+
+import (
+	"context"
+	"errors"
+	"os"
+	"testing"
+
+	"google.golang.org/protobuf/types/known/structpb"
+
+	schema "github.com/simondxu/conductor/db"
+)
+
+// openTestLedger returns a ledger on PG_TEST_DSN, skipping when it is unset.
+func openTestLedger(t *testing.T) *Postgres {
+	t.Helper()
+	dsn := os.Getenv("PG_TEST_DSN")
+	if dsn == "" {
+		t.Skip("PG_TEST_DSN not set; skipping Postgres tool ledger tests")
+	}
+	if _, err := schema.Up(dsn); err != nil {
+		t.Fatalf("migrate up: %v", err)
+	}
+	l, err := OpenPostgres(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { l.Close() })
+	if _, err := l.db.Exec("DELETE FROM tool_calls WHERE conversation_id = $1", t.Name()); err != nil {
+		t.Fatal(err)
+	}
+	return l
+}
+
+func plan(t *testing.T, l Ledger, step int64) string {
+	t.Helper()
+	args, _ := structpb.NewStruct(map[string]any{"amount": 4200})
+	hash, canonical, err := ArgsHash(args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := CallID(t.Name(), step, "charge_card", hash)
+	if err := l.Plan(context.Background(), 0, PlannedCall{
+		CallID: id, ConversationID: t.Name(), Step: step, ToolName: "charge_card",
+		ArgsHash: hash, Args: canonical, Class: Idempotent,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+func only(t *testing.T, l Ledger) ToolCall {
+	t.Helper()
+	calls, err := l.Calls(context.Background(), t.Name())
+	if err != nil || len(calls) != 1 {
+		t.Fatalf("calls = %v, err = %v; want exactly one", calls, err)
+	}
+	return calls[0]
+}
+
+func TestHappyPath(t *testing.T) {
+	l := openTestLedger(t)
+	ctx := context.Background()
+	id := plan(t, l, 3)
+	if err := l.Plan(ctx, 0, PlannedCall{CallID: id, ConversationID: t.Name(), Step: 3, ToolName: "x", Args: []byte("{}"), Class: Unsafe}); err != nil {
+		t.Fatalf("re-plan: %v", err)
+	}
+	if c := only(t, l); c.State != Planned || c.Attempts != 0 || c.IdempotencyKey != id || c.Class != Idempotent {
+		t.Fatalf("after plan: %+v", c)
+	}
+	if err := l.Start(ctx, 0, id); err != nil {
+		t.Fatal(err)
+	}
+	out := Outcome{State: Succeeded, Result: []byte(`{"status":"ok"}`)}
+	if err := l.Settle(ctx, 0, id, out); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.Settle(ctx, 0, id, out); err != nil {
+		t.Fatalf("duplicate settle: %v", err)
+	}
+	c := only(t, l)
+	if c.State != Succeeded || c.Attempts != 1 || string(c.Result) != `{"status": "ok"}` {
+		t.Fatalf("after settle: %+v (result %s)", c, c.Result)
+	}
+}
+
+func TestOutcomeUnknownThenRetry(t *testing.T) {
+	l := openTestLedger(t)
+	ctx := context.Background()
+	id := plan(t, l, 1)
+	if err := l.Start(ctx, 0, id); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.MarkUnknown(ctx, 0, id, "turn failed"); err != nil {
+		t.Fatal(err)
+	}
+	if c := only(t, l); c.State != OutcomeUnknown || c.Error != "turn failed" || c.Attempts != 1 {
+		t.Fatalf("after unknown: %+v", c)
+	}
+	// IDEMPOTENT retry: OUTCOME_UNKNOWN -> STARTED, attempts++.
+	if err := l.Start(ctx, 0, id); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.Settle(ctx, 0, id, Outcome{State: Succeeded, Result: []byte(`{}`)}); err != nil {
+		t.Fatal(err)
+	}
+	if c := only(t, l); c.State != Succeeded || c.Attempts != 2 {
+		t.Fatalf("after retry: %+v", c)
+	}
+}
+
+func TestIllegalTransitions(t *testing.T) {
+	l := openTestLedger(t)
+	ctx := context.Background()
+	id := plan(t, l, 1)
+
+	for name, err := range map[string]error{
+		"settle PLANNED":      l.Settle(ctx, 0, id, Outcome{State: Succeeded}),
+		"unknown PLANNED":     l.MarkUnknown(ctx, 0, id, "x"),
+		"start missing call":  l.Start(ctx, 0, "no-such-call"),
+		"settle to non-final": l.Settle(ctx, 0, id, Outcome{State: Started}),
+	} {
+		if !errors.Is(err, ErrTransition) {
+			t.Errorf("%s: err = %v, want ErrTransition", name, err)
+		}
+	}
+
+	_ = l.Start(ctx, 0, id)
+	_ = l.Settle(ctx, 0, id, Outcome{State: Failed})
+	for name, err := range map[string]error{
+		"start settled":       l.Start(ctx, 0, id),
+		"resettle other":      l.Settle(ctx, 0, id, Outcome{State: Succeeded}),
+		"unknown after final": l.MarkUnknown(ctx, 0, id, "x"),
+	} {
+		if !errors.Is(err, ErrTransition) {
+			t.Errorf("%s: err = %v, want ErrTransition", name, err)
+		}
+	}
+}
+
+func TestCallIDIsStableAndSensitive(t *testing.T) {
+	a, _ := structpb.NewStruct(map[string]any{"b": 1, "a": 2})
+	b, _ := structpb.NewStruct(map[string]any{"a": 2, "b": 1})
+	ha, _, _ := ArgsHash(a)
+	hb, _, _ := ArgsHash(b)
+	if ha != hb {
+		t.Fatal("args hash depends on key order")
+	}
+	base := CallID("c", 1, "t", ha)
+	if len(base) != 32 || base != CallID("c", 1, "t", hb) {
+		t.Fatalf("call id %q not stable", base)
+	}
+	for _, other := range []string{CallID("c2", 1, "t", ha), CallID("c", 2, "t", ha), CallID("c", 1, "u", ha), CallID("c", 1, "t", "x")} {
+		if other == base {
+			t.Errorf("call id did not change with its inputs")
+		}
+	}
+}

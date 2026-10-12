@@ -34,8 +34,24 @@ state=$(psql "SELECT payload::jsonb->>'state' FROM conversation_log WHERE conver
 steps=$(psql "SELECT count(*) FROM conversation_log WHERE conversation_id = '$conv'")
 [[ "$steps" == "8" ]] || fail "conversation has $steps log rows, want 8"
 
-effects=$(psql "SELECT count(*) FROM fake_effects WHERE call_id LIKE 'fake-$conv-%'")
+effects=$(psql "SELECT count(*) FROM fake_effects e JOIN tool_calls t USING (call_id) WHERE t.conversation_id = '$conv'")
 [[ "$effects" == "2" ]] || fail "fake_effects has $effects rows for $conv, want 2"
+
+settled=$(psql "SELECT count(*) FROM tool_calls WHERE conversation_id = '$conv' AND state = 'SUCCEEDED' AND attempts = 1")
+[[ "$settled" == "2" ]] || fail "tool_calls has $settled settled calls for $conv, want 2"
+
+# Falsifying queries from docs/conductor/correctness.md; each must be empty.
+check() {
+  local rows
+  rows=$(psql "$2")
+  [[ -z "$rows" ]] || fail "$1 violated: $rows"
+}
+check I1 "SELECT call_id FROM tool_calls WHERE state IN ('STARTED', 'OUTCOME_UNKNOWN') AND reconcile_deadline < now()"
+check I2 "SELECT e.idempotency_key FROM fake_effects e JOIN tool_calls t USING (call_id) WHERE t.class = 'IDEMPOTENT' GROUP BY e.idempotency_key HAVING count(*) > 1"
+check I7b "SELECT t.call_id FROM tool_calls t WHERE t.state = 'SUCCEEDED' AND NOT EXISTS (
+  SELECT 1 FROM conversation_log l WHERE l.conversation_id = t.conversation_id
+     AND l.payload::jsonb @> jsonb_build_object('steps', jsonb_build_array(
+           jsonb_build_object('tool_result', jsonb_build_object('call_id', t.call_id)))))"
 
 # Prometheus scrapes every 5s; give it a few rounds to see the run.
 for _ in $(seq 1 12); do
@@ -46,4 +62,4 @@ for _ in $(seq 1 12); do
 done
 [[ -n "$runs" && "$runs" != "0" ]] || fail "Prometheus has no completed runs"
 
-echo "PASS: $conv completed with $steps log rows, $effects effects; Prometheus sees $runs completed run(s)"
+echo "PASS: $conv completed with $steps log rows, $effects effects, $settled settled calls; I1, I2, I7b hold; Prometheus sees $runs completed run(s)"

@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/simondxu/conductor/internal/controller/toolledger"
 	"github.com/simondxu/conductor/internal/harness"
 	"github.com/simondxu/conductor/internal/harness/substrate"
 	"gopkg.in/yaml.v3"
@@ -115,6 +116,16 @@ type FakeHarnessConfig struct {
 	// os.ExpandEnv. Empty records effects in memory. In-process only; a remote
 	// harness takes its own --effects-dsn.
 	EffectsDSN string `yaml:"effects_dsn,omitempty"`
+	// Tools declares the recovery class of the script's tools. Empty declares
+	// the default script's (charge_card IDEMPOTENT, send_email UNSAFE).
+	Tools []ToolConfig `yaml:"tools,omitempty"`
+}
+
+// ToolConfig declares a tool's recovery class (IDEMPOTENT, RECONCILABLE or
+// UNSAFE). Classes are never inferred; an undeclared tool is UNSAFE.
+type ToolConfig struct {
+	Name  string `yaml:"name"`
+	Class string `yaml:"class"`
 }
 
 // AntigravityHarnessConfig registers the built-in Antigravity harness.
@@ -374,6 +385,15 @@ func (c *Config) Validate() error {
 		}
 		if sc.Default {
 			defaultCount++
+		}
+	}
+
+	for _, tc := range c.Registry.Fake.Tools {
+		if tc.Name == "" {
+			return fmt.Errorf("registry.fake.tools: name is required")
+		}
+		if _, err := toolledger.ParseClass(tc.Class); err != nil {
+			return fmt.Errorf("registry.fake.tools %q: %w", tc.Name, err)
 		}
 	}
 

@@ -279,6 +279,11 @@ idempotency key must be recomputable from durable inputs on our side alone. The
 multi-provider requirement forces the correct design here rather than weakening
 it.
 
+`step` is the call's position in the conversation's step sequence (the steps
+of every logged event, in order), not the `conversation_log.step` row number:
+the id is needed before the step is appended, and the position is equally
+recomputable from the log. **[M3]**
+
 `idempotency_key` defaults to `call_id`, stored separately so policy can diverge
 without changing identity.
 

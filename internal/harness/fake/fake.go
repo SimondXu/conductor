@@ -86,6 +86,9 @@ var DefaultScript = Script{
 	},
 }
 
+// DefaultScriptTools are the recovery classes of DefaultScript's tools.
+var DefaultScriptTools = map[string]string{"charge_card": "IDEMPOTENT", "send_email": "UNSAFE"}
+
 // Harness is the fake harness.
 type Harness struct {
 	effects EffectSink

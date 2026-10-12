@@ -22,6 +22,7 @@ import (
 	"github.com/simondxu/conductor/internal/config"
 	"github.com/simondxu/conductor/internal/controller"
 	"github.com/simondxu/conductor/internal/controller/eventlog"
+	"github.com/simondxu/conductor/internal/controller/toolledger"
 	"github.com/simondxu/conductor/internal/harness"
 	"github.com/simondxu/conductor/internal/harness/antigravity"
 	"github.com/simondxu/conductor/internal/harness/antigravityinteractions"
@@ -188,6 +189,19 @@ func NewControllerFromConfig(ctx context.Context, cfg *Config) (*controller.Cont
 	if err := reg.Register(config.FakeHarnessID, fakeHarness, controller.RecoveryFull); err != nil {
 		return nil, fmt.Errorf("register fake harness: %w", err)
 	}
+	fakeTools := map[string]toolledger.Class{}
+	for name, class := range fake.DefaultScriptTools {
+		fakeTools[name] = toolledger.Class(class)
+	}
+	if len(cfg.Registry.Fake.Tools) > 0 {
+		fakeTools = map[string]toolledger.Class{}
+		for _, tc := range cfg.Registry.Fake.Tools {
+			if fakeTools[tc.Name], err = toolledger.ParseClass(tc.Class); err != nil {
+				return nil, fmt.Errorf("fake harness tool %q: %w", tc.Name, err)
+			}
+		}
+	}
+	reg.DeclareTools(config.FakeHarnessID, fakeTools)
 	if cfg.Registry.Fake.Default {
 		defaultHarnessID = config.FakeHarnessID
 	}
@@ -219,6 +233,14 @@ func NewControllerFromConfig(ctx context.Context, cfg *Config) (*controller.Cont
 		return nil, fmt.Errorf("set default harness %q: %w", defaultHarnessID, err)
 	}
 
+	// The tool ledger lives next to the event log; SQLite has none.
+	var ledger toolledger.Ledger
+	if cfg.EventLog.PostgresConfig.DSN != "" {
+		if ledger, err = toolledger.OpenPostgres(os.ExpandEnv(cfg.EventLog.PostgresConfig.DSN)); err != nil {
+			return nil, err
+		}
+	}
+
 	return controller.New(ctx, controller.Config{
 		Registry: reg,
 		EventLogBuilder: func() (eventlog.EventLog, error) {
@@ -231,6 +253,7 @@ func NewControllerFromConfig(ctx context.Context, cfg *Config) (*controller.Cont
 			}
 			return eventlog.OpenSQLiteEventLog(cfg.EventLog.SQLiteConfig.Filename)
 		},
+		Ledger: ledger,
 	})
 }
 
