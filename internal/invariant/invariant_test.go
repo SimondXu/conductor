@@ -18,6 +18,7 @@ import (
 	"context"
 	"database/sql"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -182,11 +183,27 @@ func TestCheck_PlantedViolations(t *testing.T) {
 		},
 		"I7b": func(conv string) { call(conv, "IDEMPOTENT", "SUCCEEDED", nil) },
 	}
-	for id, plant := range plant {
+	thought := &proto.Step{Type: &proto.Step_Thought{Thought: &proto.ThoughtStep{}}}
+	// I11 has two shapes: a turn split over two events, and a run that
+	// completed on a turn cut short.
+	plant["I11"] = func(conv string) {
+		appendEv(&proto.StepEvent{ConversationId: conv, AgentId: "fake", State: proto.State_STATE_PENDING,
+			Steps: []*proto.Step{harnesstest.UserStep("go")}})
+		appendEv(&proto.StepEvent{ConversationId: conv, State: proto.State_STATE_PENDING, Steps: []*proto.Step{thought}})
+		appendEv(&proto.StepEvent{ConversationId: conv, State: proto.State_STATE_PENDING, Steps: []*proto.Step{toolCall}})
+	}
+	plant["I11 cut short"] = func(conv string) {
+		appendEv(&proto.StepEvent{ConversationId: conv, AgentId: "fake", State: proto.State_STATE_PENDING,
+			Steps: []*proto.Step{harnesstest.UserStep("go")}})
+		appendEv(&proto.StepEvent{ConversationId: conv, State: proto.State_STATE_PENDING, Steps: []*proto.Step{thought}})
+		appendEv(&proto.StepEvent{ConversationId: conv, State: proto.State_STATE_COMPLETED})
+	}
+	for name, plant := range plant {
+		id, _, _ := strings.Cut(name, " ")
 		prefix := "invariant-" + id + "-" + uuid.NewString() + "-"
 		plant(prefix + "x")
 		if r := byID(t, db, prefix)[id]; r.Violations == 0 || len(r.Examples) == 0 {
-			t.Errorf("%s missed its planted violation: %+v", id, r)
+			t.Errorf("%s missed its planted violation: %+v", name, r)
 		}
 	}
 }
