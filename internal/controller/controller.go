@@ -18,11 +18,13 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/simondxu/conductor/internal/controller/eventlog"
 	"github.com/simondxu/conductor/internal/controller/toolledger"
 	"github.com/simondxu/conductor/internal/harness"
@@ -141,6 +143,7 @@ func (d *Controller) exec(ctx context.Context, req *proto.CreateInteractionEvent
 		defer exec.Close(ctx)
 
 		if err := exec.Run(ctx, hhandler); err != nil {
+			l.logFailure(ctx, err)
 			return fmt.Errorf("harness execution failed: %w", err)
 		}
 	}
@@ -164,6 +167,7 @@ func (d *Controller) exec(ctx context.Context, req *proto.CreateInteractionEvent
 		return fmt.Errorf("failed to log inputs: %w", err)
 	}
 	if err := exec.Run(ctx, hhandler); err != nil {
+		l.logFailure(ctx, err)
 		return fmt.Errorf("harness execution failed: %w", err)
 	}
 	return nil
@@ -179,10 +183,8 @@ func (a *harnessHandler) OnMessage(ctx context.Context, execID string, step *pro
 	// TODO(anj): The harness should send the full input sent to get this particular response.
 	logStep, err := a.logger.LogOutputs(ctx, []*proto.Step{step}, proto.State_STATE_PENDING)
 	if err != nil {
-		slog.WarnContext(ctx, "Failed to log streamed message to event log",
-			slog.String("conversation_id", a.logger.conversationID),
-			slog.Any("error", err),
-		)
+		// I9: a step that is not durable is never delivered.
+		return fmt.Errorf("failed to log streamed step: %w", err)
 	}
 
 	if step != nil {
@@ -200,13 +202,7 @@ func (a *harnessHandler) OnMessage(ctx context.Context, execID string, step *pro
 func (a *harnessHandler) OnComplete(ctx context.Context, execID string) error {
 	// Mark the execution turn as completed in the conversation log
 	if _, err := a.logger.LogOutputs(ctx, nil, proto.State_STATE_COMPLETED); err != nil {
-		slog.WarnContext(ctx, "Failed to mark completion state in event log",
-			slog.String("conversation_id", a.logger.conversationID),
-			slog.Any("error", err),
-		)
-	}
-	if a.execHandler == nil {
-		return nil
+		return fmt.Errorf("failed to log completion: %w", err)
 	}
 	return nil
 }
@@ -474,7 +470,7 @@ func (l *logger) LogInputs(ctx context.Context, steps []*proto.Step, agentConfig
 		Steps:          steps,
 		State:          proto.State_STATE_PENDING,
 	}
-	return l.el.Append(ctx, ev)
+	return l.append(ctx, ev)
 }
 
 func (l *logger) LogOutputs(ctx context.Context, steps []*proto.Step, state proto.State) (int64, error) {
@@ -484,5 +480,47 @@ func (l *logger) LogOutputs(ctx context.Context, steps []*proto.Step, state prot
 		Steps:          steps,
 		State:          state,
 	}
-	return l.el.Append(ctx, ev)
+	return l.append(ctx, ev)
+}
+
+// appendAttempts bounds how often one event's append is tried. Retrying is
+// safe because every attempt carries the same event_id (I10).
+const appendAttempts = 3
+
+// append gives ev an event_id and appends it, retrying transient failures.
+func (l *logger) append(ctx context.Context, ev *proto.StepEvent) (int64, error) {
+	ev.EventId = uuid.NewString()
+	var err error
+	for attempt := range appendAttempts {
+		var step int64
+		if step, err = l.el.Append(ctx, ev); err == nil {
+			return step, nil
+		}
+		if attempt == appendAttempts-1 {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return 0, err
+		case <-time.After(time.Duration(50<<attempt) * time.Millisecond):
+		}
+	}
+	return 0, err
+}
+
+// logFailure records the end of a failed turn, so the conversation is not left
+// PENDING forever (docs/conductor/streaming-path.md §5.1): CANCELED when the
+// caller went away, FAILED otherwise. Best effort: if it cannot be written,
+// the conversation stays PENDING, as before.
+func (l *logger) logFailure(ctx context.Context, runErr error) {
+	state := proto.State_STATE_FAILED
+	if errors.Is(runErr, context.Canceled) || ctx.Err() != nil {
+		state = proto.State_STATE_CANCELED
+	}
+	if _, err := l.LogOutputs(context.WithoutCancel(ctx), nil, state); err != nil {
+		slog.WarnContext(ctx, "Failed to record the failed turn",
+			slog.String("conversation_id", l.conversationID),
+			slog.Any("error", err),
+		)
+	}
 }

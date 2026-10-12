@@ -16,9 +16,13 @@ package eventlog
 
 import (
 	"context"
+	"database/sql"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/google/uuid"
+	gproto "google.golang.org/protobuf/proto"
 
 	schema "github.com/simondxu/conductor/db"
 	"github.com/simondxu/conductor/proto"
@@ -28,16 +32,14 @@ import (
 // fresh, empty event log for each subtest, using the subtest's *testing.T for
 // temp dirs and cleanup.
 //
-// Subtests derive their IDs from t.Name() (which includes the backend and
-// subtest name) and clear them with DeleteAll before and after running, so they
-// are safe against the shared Postgres database and harmless against SQLite's
-// per-test file.
+// Subtests derive their IDs from t.Name() plus a random suffix, so reruns
+// against a shared Postgres database never see an earlier run's rows.
 func testEventLog(t *testing.T, newLog func(t *testing.T) EventLog) {
 	t.Run("AppendAndEvents", func(t *testing.T) {
 		ctx := context.Background()
 		log := newLog(t)
 
-		conv := t.Name() + "-conv-1"
+		conv := t.Name() + "-conv-1-" + uuid.NewString()
 		task1 := t.Name() + "-task-1"
 		task2 := t.Name() + "-task-2"
 
@@ -69,6 +71,35 @@ func testEventLog(t *testing.T, newLog func(t *testing.T) EventLog) {
 
 	})
 
+	// I10: a retried append with the same event_id is a no-op that returns
+	// the existing step.
+	t.Run("AppendIdempotentUnderRetry", func(t *testing.T) {
+		ctx := context.Background()
+		log := newLog(t)
+		conv := t.Name() + "-" + uuid.NewString()
+
+		ev := &proto.StepEvent{ConversationId: conv, EventId: uuid.NewString(), Steps: []*proto.Step{{Description: "x"}}}
+		first, err := log.Append(ctx, ev)
+		if err != nil {
+			t.Fatal(err)
+		}
+		retry, err := log.Append(ctx, gproto.Clone(ev).(*proto.StepEvent))
+		if err != nil {
+			t.Fatalf("retry: %v", err)
+		}
+		if retry != first {
+			t.Errorf("retry returned step %d, want %d", retry, first)
+		}
+		next, err := log.Append(ctx, &proto.StepEvent{ConversationId: conv, EventId: uuid.NewString()})
+		if err != nil || next != first+1 {
+			t.Errorf("next append = %d, %v; want %d", next, err, first+1)
+		}
+		events, _ := log.Events(ctx, conv)
+		if len(events) != 2 {
+			t.Errorf("events = %d, want 2", len(events))
+		}
+	})
+
 	t.Run("Empty", func(t *testing.T) {
 		ctx := context.Background()
 		log := newLog(t)
@@ -88,7 +119,7 @@ func testEventLog(t *testing.T, newLog func(t *testing.T) EventLog) {
 		ctx := context.Background()
 		log := newLog(t)
 
-		conv := t.Name() + "-conv"
+		conv := t.Name() + "-conv-" + uuid.NewString()
 
 		const n = 3
 		for i := int64(1); i <= n; i++ {
@@ -161,5 +192,32 @@ func TestSQLiteEventLog_CreatesParentDirectory(t *testing.T) {
 	}
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
 		t.Fatalf("expected database file to be created, but it does not exist")
+	}
+}
+
+// A SQLite file created before event_id existed is upgraded on open.
+func TestSQLiteEventLog_UpgradesOldSchema(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "old.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE conversation_log (conversation_id TEXT NOT NULL, step INTEGER NOT NULL, payload TEXT NOT NULL, PRIMARY KEY (conversation_id, step))`); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	log, err := OpenSQLiteEventLog(path)
+	if err != nil {
+		t.Fatalf("open old schema: %v", err)
+	}
+	defer log.Close()
+	ev := &proto.StepEvent{ConversationId: "c", EventId: uuid.NewString()}
+	a, err := log.Append(context.Background(), ev)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b, err := log.Append(context.Background(), ev); err != nil || b != a {
+		t.Fatalf("retry = %d, %v; want %d", b, err, a)
 	}
 }
