@@ -37,6 +37,10 @@ type RunIndex interface {
 	// one back by backoff(n), in its own transaction, and returns n. It
 	// returns 0 when the conversation has no runs row.
 	BumpRecoveryAttempt(ctx context.Context, conversationID string, backoff func(n int) time.Duration) (int, error)
+	// RefundRecoveryAttempt takes back a counted attempt that never ran the
+	// run (another owner held it, or this replica shut down) and clears the
+	// backoff, so the next owner need not wait it out.
+	RefundRecoveryAttempt(ctx context.Context, conversationID string) error
 }
 
 // Candidate is a conversation the reconciler may recover.
@@ -135,4 +139,14 @@ func (p *Postgres) BumpRecoveryAttempt(ctx context.Context, conversationID strin
 		return 0, fmt.Errorf("eventlog: set backoff: %w", err)
 	}
 	return n, tx.Commit()
+}
+
+// RefundRecoveryAttempt implements RunIndex.
+func (p *Postgres) RefundRecoveryAttempt(ctx context.Context, conversationID string) error {
+	if _, err := p.db.ExecContext(ctx, `
+		UPDATE runs SET recovery_attempts = GREATEST(recovery_attempts - 1, 0), next_attempt_at = NULL
+		 WHERE conversation_id = $1`, conversationID); err != nil {
+		return fmt.Errorf("eventlog: refund recovery attempt: %w", err)
+	}
+	return nil
 }

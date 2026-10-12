@@ -841,8 +841,10 @@ Decisions made while building it:
   - `tool_outcome_unknown_total{resolution}` takes `retried`, `reconciled`
     (settled from a later-observed result), `abandoned` or
     `deadline_exceeded`.
-- **`recovery_total{result}`** is `success | failure | held`, where `held`
-  means another owner won the lease.
+- **`recovery_total{result}`** is `success | failure | held | canceled`,
+  where `held` means another owner won the lease and `canceled` that this
+  replica shut down mid-recovery. Neither counts against the poison guard:
+  the attempt is refunded and its backoff cleared.
 - **`recovery_duration_seconds` is the stall**: the run's idle time when the
   reconciler found it (database clock), plus the recovery itself.
   `kill_kind` comes from the lease row: `graceful` (released), `ungraceful`
@@ -933,12 +935,25 @@ After each repeat, `internal/invariant` checks that repeat's conversations.
 "Recovered" is the run leaving `PENDING` within 90 s; `FAILED` counts, since
 an `UNSAFE` call cut off mid-flight fails the run by design.
 
-Measured on a laptop, one injection each: SIGKILL recovers in 4.5–12.5 s
-across all seven controller boundaries; graceful in 6.5–10.4 s. **Graceful
-handover is not sub-second**, as §8.1 expected: the released run waits for
-another replica's next reconciler pass (5 s interval plus jitter), then
-re-runs the 4 s charge. Nothing yet tells the other replicas that a lease was
-released.
+Measured on a laptop: SIGKILL recovers in 4.5–12.5 s across all seven
+controller boundaries (one injection each).
+
+**Graceful handover.**
+- First measurement: 6.5–10.4 s. The released run waited for another
+  replica's next reconciler pass, a 5 s interval plus jitter.
+- Since then, an `Exec` whose caller went away (a drain, a client
+  disconnect) sends `NOTIFY conductor_handover` after its `Release`. Every
+  replica's reconciler `LISTEN`s and starts a pass at once.
+- A recovery that loses the lease (`held`) or is cut off by its own
+  replica's shutdown (`canceled`) is refunded. Before this it set a backoff,
+  and the next owner of a run handed over twice had to wait it out (one
+  rolling restart took 16 s).
+- Now the takeover starts about 0.1 s after the release. A graceful
+  injection takes a steady 6.2 s: the 2 s drain, plus re-running the 4 s
+  charge, plus the email. The rolling restart takes 6.1–8.8 s; the upper
+  end is a run handed to a replica that is restarted next.
+- `TestReconciler_TakesOverHandoverAtOnce` holds the takeover under 5 s
+  with a one-minute reconciler interval.
 
 Not built from PRD §5's flag list: `--target` (the class decides),
 `--conversation` and `--assert` (every invariant is always checked).

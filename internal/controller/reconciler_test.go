@@ -448,3 +448,91 @@ func TestReplicas_RollingUpdateHandsOverOnce(t *testing.T) {
 		t.Fatalf("call = %s attempts %d effects %d, want SUCCEEDED after 2 with 1 effect", calls[0].State, calls[0].Attempts, len(r.effects.Effects))
 	}
 }
+
+// A run released unfinished is taken over at once, not at the next pass:
+// B's reconciler is already idle with a one-minute interval when A's caller
+// goes away mid-tool, and B still completes the run within seconds.
+func TestReconciler_TakesOverHandoverAtOnce(t *testing.T) {
+	r := newRecRig(t, func(reg *Registry, effects *fake.MemoryEffects) {
+		if err := reg.Register("fake", fake.New(effects), RecoveryFull); err != nil {
+			t.Fatal(err)
+		}
+		reg.DeclareTools("fake", map[string]toolledger.Class{"charge_card": toolledger.Idempotent})
+	})
+	b := r.controller(t, "replica-b")
+	loopCtx, stopLoop := context.WithCancel(context.Background())
+	loopDone := make(chan error)
+	go func() { loopDone <- b.RunReconciler(loopCtx, ReconcilerConfig{Interval: time.Minute}) }()
+	t.Cleanup(func() {
+		stopLoop()
+		if err := <-loopDone; err != nil {
+			t.Error(err)
+		}
+	})
+
+	ctx, stop := context.WithCancel(context.Background())
+	done := make(chan error)
+	go func() {
+		done <- r.c.Exec(ctx, &proto.CreateInteractionEvent{
+			ConversationId: r.conv, AgentId: "fake",
+			AgentConfig: []byte(`{"turns":[{"tool_calls":[{"name":"charge_card"}]},{"content":"done"}],"tools":{"charge_card":{"idempotent":true,"delay_ms":1000}}}`),
+			Inputs:      []*proto.Step{harnesstest.UserStep("go")},
+		}, nil)
+	}()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		calls, err := r.ledger.Calls(context.Background(), r.conv)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(calls) == 1 && calls[0].State == toolledger.Started {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the call never started")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	stop()
+	if err := <-done; err == nil {
+		t.Fatal("canceled run returned no error")
+	}
+	handover := time.Now()
+	r.waitState(t, proto.State_STATE_COMPLETED)
+	if took := time.Since(handover); took > 5*time.Second {
+		t.Errorf("handover took %v; it should not wait for the reconciler's next pass", took)
+	}
+	r.checkOneTerminalState(t)
+}
+
+// A recovery that loses the lease to another owner never tried the run: its
+// attempt is refunded and the backoff cleared, so a later takeover does not
+// wait for it.
+func TestRecoverOne_HeldAttemptIsRefunded(t *testing.T) {
+	r := newRecRig(t, func(reg *Registry, effects *fake.MemoryEffects) {
+		if err := reg.Register("fake", fake.New(effects), RecoveryFull); err != nil {
+			t.Fatal(err)
+		}
+	})
+	ctx := context.Background()
+	if _, err := r.log.Append(ctx, &proto.StepEvent{
+		ConversationId: r.conv, EventId: uuid.NewString(), AgentId: "fake", State: proto.State_STATE_PENDING,
+		Steps: []*proto.Step{harnesstest.UserStep("go")},
+	}, 0); err != nil {
+		t.Fatal(err)
+	}
+	held, err := r.leases.Acquire(ctx, r.conv, "other", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Release(ctx)
+	r.c.recoverOne(ctx, r.runs, eventlog.Candidate{ConversationID: r.conv, AgentID: "fake"}, 5)
+	var attempts int
+	var next sql.NullTime
+	if err := r.db.QueryRow("SELECT recovery_attempts, next_attempt_at FROM runs WHERE conversation_id = $1", r.conv).Scan(&attempts, &next); err != nil {
+		t.Fatal(err)
+	}
+	if attempts != 0 || next.Valid {
+		t.Fatalf("after a held recovery attempts = %d next_attempt_at valid = %v, want 0 and none", attempts, next.Valid)
+	}
+}

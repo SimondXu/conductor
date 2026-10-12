@@ -43,7 +43,7 @@ var (
 var (
 	recoveryTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "conductor_recovery_total",
-		Help: "Reconciler recovery attempts by result: success, failure or held (another owner won).",
+		Help: "Reconciler recovery attempts by result: success, failure, held (another owner won) or canceled (this replica shut down).",
 	}, []string{"result"})
 	recoveryDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
 		Name: "conductor_recovery_duration_seconds",
