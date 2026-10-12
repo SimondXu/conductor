@@ -29,6 +29,7 @@ import (
 	"github.com/simondxu/conductor/internal/controller/lease"
 	"github.com/simondxu/conductor/internal/controller/toolledger"
 	"github.com/simondxu/conductor/internal/harness"
+	"github.com/simondxu/conductor/internal/telemetry"
 	"github.com/simondxu/conductor/proto"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/types/known/structpb"
@@ -84,6 +85,10 @@ func New(ctx context.Context, cfg Config) (*Controller, error) {
 	if cfg.Lease != nil && cfg.OwnerID == "" {
 		return nil, fmt.Errorf("owner id is required with a lease")
 	}
+	ownerID := cfg.OwnerID
+	if ownerID == "" {
+		ownerID = "local" // process-local ownership (SQLite)
+	}
 	ttl := cfg.LeaseTTL
 	if ttl == 0 {
 		ttl = DefaultLeaseTTL
@@ -93,7 +98,7 @@ func New(ctx context.Context, cfg Config) (*Controller, error) {
 		eventLog: eventLog,
 		ledger:   cfg.Ledger,
 		lease:    cfg.Lease,
-		ownerID:  cfg.OwnerID,
+		ownerID:  ownerID,
 		leaseTTL: ttl,
 	}, nil
 }
@@ -102,10 +107,10 @@ func New(ctx context.Context, cfg Config) (*Controller, error) {
 // If id is empty, a UUID will be generated.
 // If the execution already exists, it will be resumed with optional new inputs.
 func (d *Controller) Exec(ctx context.Context, req *proto.CreateInteractionEvent, handler ExecHandler) (err error) {
-	runsActive.Inc()
+	runsActive.WithLabelValues(d.ownerID).Inc()
 	start := time.Now()
 	defer func() {
-		runsActive.Dec()
+		runsActive.WithLabelValues(d.ownerID).Dec()
 		outcome := runOutcome(err)
 		runsTotal.WithLabelValues(outcome).Inc()
 		runDuration.WithLabelValues(outcome).Observe(time.Since(start).Seconds())
@@ -117,11 +122,13 @@ func (d *Controller) exec(ctx context.Context, req *proto.CreateInteractionEvent
 	if req.ConversationId == "" {
 		return fmt.Errorf("conversation_id is required")
 	}
+	ctx = telemetry.WithLogAttrs(ctx, slog.String("conversation_id", req.ConversationId), slog.String("owner_id", d.ownerID))
 	ctx, gen, release, err := d.own(ctx, req.ConversationId)
 	if err != nil {
 		return err
 	}
 	defer release()
+	ctx = telemetry.WithLogAttrs(ctx, slog.Int64("generation", gen))
 
 	// TODO(jbd): Resume an incomplete execution if there exists one.
 	// TODO(jbd): Enable bringing a remote harness that implements HarnessService.
@@ -132,9 +139,14 @@ func (d *Controller) exec(ctx context.Context, req *proto.CreateInteractionEvent
 	if err != nil {
 		return fmt.Errorf("failed to check resumption state: %w", err)
 	}
+	replayEvents.Add(float64(len(events)))
 	st, err := rebuild(events)
 	if err != nil {
 		return fmt.Errorf("failed to rebuild conversation %q: %w", req.ConversationId, err)
+	}
+	if len(req.Inputs) == 0 {
+		slog.InfoContext(ctx, "recovery.rebuild", slog.Int("events", len(events)),
+			slog.Int("steps", len(st.History)), slog.String("state", st.State.String()))
 	}
 	state, storedHarnessID := st.State, st.HarnessID
 
@@ -234,8 +246,7 @@ func (d *Controller) own(ctx context.Context, conversationID string) (context.Co
 	return ctx, held.Generation(), func() {
 		cancel()
 		if err := held.Release(context.WithoutCancel(ctx)); err != nil && !errors.Is(err, lease.ErrLost) {
-			slog.WarnContext(ctx, "Failed to release the conversation lease",
-				slog.String("conversation_id", conversationID), slog.Any("error", err))
+			slog.WarnContext(ctx, "Failed to release the conversation lease", slog.Any("error", err))
 		}
 	}, nil
 }
@@ -541,7 +552,6 @@ func (l *logger) LogInputs(ctx context.Context, steps []*proto.Step, agentConfig
 		cfg = &structpb.Struct{}
 		if err := protojson.Unmarshal(agentConfig, cfg); err != nil {
 			slog.WarnContext(ctx, "Failed to parse agent config for logging",
-				slog.String("conversation_id", l.conversationID),
 				slog.Any("error", err),
 			)
 			cfg = nil
@@ -604,7 +614,6 @@ func (l *logger) logFailure(ctx context.Context, runErr error) {
 	}
 	if _, err := l.LogOutputs(context.WithoutCancel(ctx), nil, state); err != nil {
 		slog.WarnContext(ctx, "Failed to record the failed turn",
-			slog.String("conversation_id", l.conversationID),
 			slog.Any("error", err),
 		)
 	}

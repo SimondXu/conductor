@@ -55,7 +55,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	ctx := cmd.Context()
 
 	// Initialize structured logging (JSON to stdout)
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
+	slog.SetDefault(slog.New(telemetry.LogHandler{Handler: slog.NewJSONHandler(os.Stdout, nil)}))
 
 	cfg, err := newConfig(cmd, serveConfigFile)
 	if err != nil {

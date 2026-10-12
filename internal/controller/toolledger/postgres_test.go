@@ -20,6 +20,8 @@ import (
 	"os"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"google.golang.org/protobuf/types/known/structpb"
 
 	schema "github.com/simondxu/conductor/db"
@@ -101,6 +103,12 @@ func TestHappyPath(t *testing.T) {
 func TestOutcomeUnknownThenRetry(t *testing.T) {
 	l := openTestLedger(t)
 	ctx := context.Background()
+	metric := func(c *prometheus.CounterVec, labels ...string) float64 {
+		return testutil.ToFloat64(c.WithLabelValues(labels...))
+	}
+	retried0 := metric(outcomeUnknown, "charge_card", resolutionRetried)
+	attempts0 := metric(toolAttempts, "charge_card", string(Idempotent))
+	succeeded0 := metric(toolCalls, "charge_card", string(Idempotent), string(Succeeded))
 	id := plan(t, l, 1)
 	if err := l.Start(ctx, 0, id); err != nil {
 		t.Fatal(err)
@@ -121,6 +129,15 @@ func TestOutcomeUnknownThenRetry(t *testing.T) {
 	if c := only(t, l); c.State != Succeeded || c.Attempts != 2 {
 		t.Fatalf("after retry: %+v", c)
 	}
+	if d := metric(outcomeUnknown, "charge_card", resolutionRetried) - retried0; d != 1 {
+		t.Errorf("outcome_unknown{retried} += %v, want 1", d)
+	}
+	if d := metric(toolAttempts, "charge_card", string(Idempotent)) - attempts0; d != 2 {
+		t.Errorf("attempts += %v, want 2", d)
+	}
+	if d := metric(toolCalls, "charge_card", string(Idempotent), string(Succeeded)) - succeeded0; d != 1 {
+		t.Errorf("tool_calls{SUCCEEDED} += %v, want 1", d)
+	}
 }
 
 // I1's bound: an OUTCOME_UNKNOWN call past its deadline is abandoned; one
@@ -139,6 +156,9 @@ func TestExpireDeadlines(t *testing.T) {
 	}
 	if _, err := l.db.Exec("UPDATE tool_calls SET reconcile_deadline = now() - interval '1 second' WHERE conversation_id = $1", t.Name()); err != nil {
 		t.Fatal(err)
+	}
+	if n, err := l.CountUnsettled(ctx); err != nil || n[Started] < 1 || n[OutcomeUnknown] < 1 {
+		t.Fatalf("CountUnsettled = %v, %v; want at least one STARTED and one OUTCOME_UNKNOWN", n, err)
 	}
 	if n, err := l.ExpireDeadlines(ctx); err != nil || n < 1 {
 		t.Fatalf("ExpireDeadlines = %d, %v; want at least 1", n, err)

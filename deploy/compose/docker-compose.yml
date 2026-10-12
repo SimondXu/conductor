@@ -45,7 +45,7 @@ services:
   fake-harness:
     <<: *conductor-image
     environment: *dsn
-    command: ["sh", "-c", "exec conductor harness fake --host 0.0.0.0 --port 50053 --effects-dsn \"$$CONDUCTOR_DSN\""]
+    command: ["sh", "-c", "exec conductor harness fake --host 0.0.0.0 --port 50053 --effects-dsn \"$$CONDUCTOR_DSN\" --metrics-addr :9091"]
     # crash_after_effect exits the process; come back for the resume.
     restart: on-failure
     ports: ["${FAKE_HARNESS_PORT:-50053}:50053"]

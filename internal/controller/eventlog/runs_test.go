@@ -127,8 +127,15 @@ func TestRecoveryCandidates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	ids := map[string]Candidate{}
+	for _, c := range got {
+		ids[c.ConversationID] = c
+	}
+	if c := ids[pending]; c.AgentID != "rf" || c.KillKind != "none" || c.Idle < 0 {
+		t.Errorf("candidate %+v, want agent rf, never leased", c)
+	}
 	for conv, want := range map[string]bool{pending: true, unsettled: true, other: false, done: false, leased: false, backedOff: false} {
-		if slices.Contains(got, conv) != want {
+		if _, ok := ids[conv]; ok != want {
 			t.Errorf("candidate %s: got %t, want %t", conv, !want, want)
 		}
 	}

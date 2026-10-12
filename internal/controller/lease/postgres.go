@@ -64,11 +64,14 @@ func (p *Postgres) Acquire(ctx context.Context, conversationID, ownerID string, 
 		RETURNING generation, EXTRACT(EPOCH FROM expires_at - now())::float8`,
 		conversationID, ownerID, ttl.Seconds()).Scan(&gen, &remaining)
 	if errors.Is(err, sql.ErrNoRows) {
+		acquisitions.WithLabelValues("held").Inc()
 		return nil, fmt.Errorf("%w: %s", ErrHeld, conversationID)
 	}
 	if err != nil {
+		acquisitions.WithLabelValues("error").Inc()
 		return nil, fmt.Errorf("lease: acquire %s: %w", conversationID, err)
 	}
+	acquisitions.WithLabelValues("acquired").Inc()
 	h := &held{
 		p: p, conversationID: conversationID, ownerID: ownerID, gen: gen, ttl: ttl,
 		done:     make(chan struct{}),
@@ -98,6 +101,9 @@ type held struct {
 	deadline time.Time // carries a monotonic reading
 	timer    *time.Timer
 	lost     bool
+	// renewing and renewFailed tell a deadline that passed during, or after,
+	// failed renewals from one no renewal tried to prevent.
+	renewing, renewFailed bool
 }
 
 func (h *held) Generation() int64     { return h.gen }
@@ -119,6 +125,7 @@ func (h *held) Remaining() time.Duration {
 func (h *held) Renew(ctx context.Context) error {
 	h.mu.Lock()
 	lost, deadline := h.lost, h.deadline
+	h.renewing = true
 	h.mu.Unlock()
 	if lost {
 		return fmt.Errorf("%w: %s generation %d", ErrLost, h.conversationID, h.gen)
@@ -135,16 +142,17 @@ func (h *held) Renew(ctx context.Context) error {
 		   AND expires_at > now()
 		RETURNING EXTRACT(EPOCH FROM expires_at - now())::float8`,
 		h.conversationID, h.ownerID, h.gen, h.ttl.Seconds()).Scan(&remaining)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.renewing = false
 	if errors.Is(err, sql.ErrNoRows) {
-		h.lose()
+		h.loseLocked(lossPreempted)
 		return fmt.Errorf("%w: %s generation %d", ErrLost, h.conversationID, h.gen)
 	}
+	h.renewFailed = err != nil
 	if err != nil {
 		return fmt.Errorf("lease: renew %s: %w", h.conversationID, err)
 	}
-
-	h.mu.Lock()
-	defer h.mu.Unlock()
 	if h.lost {
 		return fmt.Errorf("%w: %s generation %d", ErrLost, h.conversationID, h.gen)
 	}
@@ -158,7 +166,9 @@ func (h *held) Renew(ctx context.Context) error {
 // Release stops local work first, then frees the row. It never deletes it:
 // the generation must outlive the lease (§2.2).
 func (h *held) Release(ctx context.Context) error {
-	h.lose()
+	h.mu.Lock()
+	h.loseLocked("")
+	h.mu.Unlock()
 	res, err := h.p.db.ExecContext(ctx, `
 		UPDATE conversation_leases SET owner_id = NULL, expires_at = now()
 		 WHERE conversation_id = $1 AND owner_id = $2 AND generation = $3`,
@@ -185,18 +195,28 @@ func (h *held) expire() {
 		h.timer.Reset(left) // a renewal extended the deadline as we fired
 		return
 	}
-	h.loseLocked()
+	if h.renewing || h.renewFailed {
+		h.loseLocked(lossRenewTimeout)
+	} else {
+		h.loseLocked(lossDeadlineElapsed)
+	}
 }
 
-func (h *held) lose() {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.loseLocked()
-}
+// Loss reasons for conductor_lease_losses_total.
+const (
+	lossPreempted       = "preempted"        // the database no longer has us as owner
+	lossRenewTimeout    = "renew_timeout"    // a renewal was stuck or failing at the deadline
+	lossDeadlineElapsed = "deadline_elapsed" // the deadline passed with no renewal attempted in time
+)
 
-func (h *held) loseLocked() {
+// loseLocked stops the lease. reason is empty for a Release, which is not a
+// loss.
+func (h *held) loseLocked(reason string) {
 	if h.lost {
 		return
+	}
+	if reason != "" {
+		losses.WithLabelValues(reason).Inc()
 	}
 	h.lost = true
 	h.timer.Stop()

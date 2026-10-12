@@ -24,10 +24,10 @@ import (
 
 // Run metrics (docs/conductor/ARCHITECTURE.md §7.2). A run is one Exec call.
 var (
-	runsActive = promauto.NewGauge(prometheus.GaugeOpts{
+	runsActive = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "conductor_runs_active",
-		Help: "Exec calls in progress on this replica.",
-	})
+		Help: "Exec calls in progress on this replica, by owner id.",
+	}, []string{"owner"})
 	runsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "conductor_runs_total",
 		Help: "Finished Exec calls by outcome.",
@@ -43,11 +43,30 @@ var (
 var (
 	recoveryTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "conductor_recovery_total",
-		Help: "Reconciler recovery attempts by result: recovered, held (another owner won) or failed.",
+		Help: "Reconciler recovery attempts by result: success, failure or held (another owner won).",
 	}, []string{"result"})
+	recoveryDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name: "conductor_recovery_duration_seconds",
+		Help: "How long a recovered run was stalled: from its last append before recovery to " +
+			"the end of the recovery, by how its last owner let go (graceful, ungraceful, none).",
+		Buckets: prometheus.ExponentialBuckets(0.5, 2, 12), // 0.5s .. ~17m
+	}, []string{"kill_kind"})
+	recoverySkipped = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "conductor_recovery_skipped_total",
+		Help: "Abandoned runs the reconciler cannot recover, by reason; each is counted at most once an hour.",
+	}, []string{"reason"})
 	recoveryPoisoned = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "conductor_recovery_poisoned_total",
 		Help: "Runs failed because their recovery kept failing.",
+	})
+	toolCallsUnsettled = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "conductor_tool_calls_unsettled",
+		Help: "Tool calls in STARTED or OUTCOME_UNKNOWN across the database, sampled each reconciler pass; " +
+			"every replica reports the same value, so aggregate with max.",
+	}, []string{"state"})
+	replayEvents = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "conductor_replay_events_total",
+		Help: "Events read to rebuild conversations, one full replay per Exec.",
 	})
 )
 

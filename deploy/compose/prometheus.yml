@@ -18,3 +18,7 @@ scrape_configs:
   - job_name: conductor
     static_configs:
       - targets: ["conductor:9090"]
+  # The fake harness counts duplicate effects (I2), which only it can see.
+  - job_name: fake-harness
+    static_configs:
+      - targets: ["fake-harness:9091"]

@@ -105,4 +105,19 @@ for _ in $(seq 1 12); do
 done
 [[ -n "$runs" && "$runs" != "0" ]] || fail "Prometheus has no completed runs"
 
+# M5: the core metrics are scraped. Labelled metrics appear only once
+# something increments them, so this lists the ones the runs above must have
+# produced (losses, skips and duplicate effects should not have happened).
+names=$(dc exec -T prometheus wget -qO- 'http://localhost:9090/api/v1/label/__name__/values')
+for m in conductor_runs_active conductor_runs_total conductor_run_duration_seconds_bucket \
+         conductor_recovery_total conductor_recovery_duration_seconds_bucket conductor_recovery_poisoned_total \
+         conductor_replay_events_total conductor_lease_acquisitions_total \
+         conductor_tool_calls_total conductor_tool_attempts_total conductor_tool_duration_seconds_bucket \
+         conductor_tool_outcome_unknown_total conductor_tool_calls_unsettled; do
+  [[ "$names" == *"\"$m\""* ]] || fail "Prometheus has no $m"
+done
+up=$(dc exec -T prometheus wget -qO- 'http://localhost:9090/api/v1/query?query=up{job="fake-harness"}' \
+  | sed -n 's/.*"value":\[[^,]*,"\([0-9]\)"\].*/\1/p')
+[[ "$up" == "1" ]] || fail "Prometheus is not scraping the fake harness"
+
 echo "PASS: $conv completed with $steps log rows and $settled settled calls; $crash (harness crash) and $killed (controller SIGKILL) recovered by the reconciler with one effect over two attempts; I1, I2, I7b hold; Prometheus sees $runs completed run(s)"
