@@ -40,10 +40,11 @@ until_eq() {
   fail "waited $1s for '$3' from: $2 (last: '$got')"
 }
 
-# install_runsc puts runsc and its containerd shim on the node and registers
-# the runtime handler runsc, once. gVisor publishes each release as one
-# tarball; it is fetched and checked on this host, which has bzip2, and only
-# the two binaries are copied into the node. Needs GNU tar (Linux, as in CI).
+# install_runsc puts runsc, its containerd shim and the sidecars runsc runs
+# from gvisor-bin/ next to it on the node, and registers the runtime handler
+# runsc, once. gVisor publishes each release as one tarball; it is fetched
+# and checked on this host, which has bzip2, and runsc's directory is copied
+# into the node's /usr/local/bin.
 install_runsc() {
   local node="$cluster-control-plane"
   if ! docker exec "$node" test -x /usr/local/bin/runsc; then
@@ -53,10 +54,14 @@ install_runsc() {
     curl -fsSL -o "$tmp/gvisor.tar.bz2" "$url"
     curl -fsSL -o "$tmp/gvisor.tar.bz2.sha512" "$url.sha512"
     (cd "$tmp" && shasum -a 512 -c gvisor.tar.bz2.sha512)
-    tar -xjf "$tmp/gvisor.tar.bz2" -C "$tmp" --wildcards '*runsc' '*containerd-shim-runsc-v1'
-    for bin in runsc containerd-shim-runsc-v1; do
-      docker cp "$(find "$tmp" -type f -name "$bin" | head -1)" "$node:/usr/local/bin/$bin"
-    done
+    tar -xjf "$tmp/gvisor.tar.bz2" -C "$tmp"
+    rm "$tmp/gvisor.tar.bz2" "$tmp/gvisor.tar.bz2.sha512"
+    local dir shim
+    dir=$(dirname "$(find "$tmp" -type f -name runsc | head -1)")
+    shim=$(find "$tmp" -type f -name containerd-shim-runsc-v1 | head -1)
+    [[ -x "$dir/runsc" && -n "$shim" ]] || fail "no runsc or containerd-shim-runsc-v1 in $url"
+    docker cp "$dir/." "$node:/usr/local/bin/"
+    docker cp "$shim" "$node:/usr/local/bin/containerd-shim-runsc-v1"
     rm -rf "$tmp"
     docker exec "$node" sh -ec 'chmod +x /usr/local/bin/runsc /usr/local/bin/containerd-shim-runsc-v1
       printf "%s\n" "[plugins.\"io.containerd.grpc.v1.cri\".containerd.runtimes.runsc]" "  runtime_type = \"io.containerd.runsc.v1\"" >> /etc/containerd/config.toml

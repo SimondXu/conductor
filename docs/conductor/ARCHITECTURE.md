@@ -465,8 +465,11 @@ documented as unsupported; Apache-2.0 attribution is unaffected.
      ships each release as one `gvisor.tar.bz2`, and the `latest/runsc`
      URLs older guides give return 404. So the script fetches the pinned
      release's tarball (`GVISOR_RELEASE`, default 20260928) on the host,
-     sha512-checks it, and copies only the two binaries into the node. The
-     extraction uses GNU tar, so this mode runs on Linux, as in CI.
+     sha512-checks it, and copies runsc's directory into the node's
+     `/usr/local/bin`, along with the shim. Copying the directory matters:
+     current runsc starts its sentry from `gvisor-bin/` beside itself, and
+     with only the binary the sandbox fails ("sidecar gvisor_sentry not
+     usable").
   2. Registers the `runsc` handler with containerd.
   3. Runs the M6 assertion (delete the harness pod mid-tool-call; the run
      recovers and completes) with `runtime_class: gvisor`.
