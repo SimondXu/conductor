@@ -32,11 +32,24 @@ type RunIndex interface {
 	// call in STARTED or OUTCOME_UNKNOWN, which catches a runs row that is
 	// stale, wrong or missing. Conversations whose backoff has not elapsed,
 	// or whose lease has not expired, are left out.
-	RecoveryCandidates(ctx context.Context, harnessIDs []string, limit int) ([]string, error)
+	RecoveryCandidates(ctx context.Context, harnessIDs []string, limit int) ([]Candidate, error)
 	// BumpRecoveryAttempt counts one recovery attempt and pushes the next
 	// one back by backoff(n), in its own transaction, and returns n. It
 	// returns 0 when the conversation has no runs row.
 	BumpRecoveryAttempt(ctx context.Context, conversationID string, backoff func(n int) time.Duration) (int, error)
+}
+
+// Candidate is a conversation the reconciler may recover.
+type Candidate struct {
+	ConversationID string
+	// AgentID is the run's harness, empty when it has no runs row.
+	AgentID string
+	// Idle is how long the run had gone without an append when it was found,
+	// by the database clock.
+	Idle time.Duration
+	// KillKind is how its last owner let go: "graceful" (released),
+	// "ungraceful" (the lease expired) or "none" (never leased).
+	KillKind string
 }
 
 // projectRun applies one appended event to the runs projection: the last
@@ -63,9 +76,13 @@ func projectRun(ctx context.Context, tx *sql.Tx, ev *proto.StepEvent, step int64
 	return nil
 }
 
-func (p *Postgres) RecoveryCandidates(ctx context.Context, harnessIDs []string, limit int) ([]string, error) {
+func (p *Postgres) RecoveryCandidates(ctx context.Context, harnessIDs []string, limit int) ([]Candidate, error) {
 	rows, err := p.db.QueryContext(ctx, `
-		SELECT c.conversation_id
+		SELECT c.conversation_id, COALESCE(r.agent_id, ''),
+		       COALESCE(EXTRACT(EPOCH FROM now() - r.updated_at), 0)::float8,
+		       CASE WHEN l.conversation_id IS NULL THEN 'none'
+		            WHEN l.owner_id IS NULL THEN 'graceful'
+		            ELSE 'ungraceful' END
 		  FROM (SELECT conversation_id FROM runs WHERE state = 'PENDING'
 		        UNION
 		        SELECT conversation_id FROM tool_calls
@@ -82,13 +99,15 @@ func (p *Postgres) RecoveryCandidates(ctx context.Context, harnessIDs []string, 
 		return nil, fmt.Errorf("eventlog: recovery candidates: %w", err)
 	}
 	defer rows.Close()
-	var out []string
+	var out []Candidate
 	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
+		var c Candidate
+		var idle float64
+		if err := rows.Scan(&c.ConversationID, &c.AgentID, &idle, &c.KillKind); err != nil {
 			return nil, fmt.Errorf("eventlog: scan candidate: %w", err)
 		}
-		out = append(out, id)
+		c.Idle = time.Duration(idle * float64(time.Second))
+		out = append(out, c)
 	}
 	return out, rows.Err()
 }

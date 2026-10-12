@@ -21,6 +21,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
 	schema "github.com/simondxu/conductor/db"
 )
 
@@ -165,8 +167,12 @@ func TestRenewWithStaleGenerationFails(t *testing.T) {
 		t.Fatal("a lost its lease before observing the takeover")
 	}
 
+	preempted := testutil.ToFloat64(losses.WithLabelValues(lossPreempted))
 	if err := a.Renew(ctx); !errors.Is(err, ErrLost) {
 		t.Fatalf("stale renew: err = %v, want ErrLost", err)
+	}
+	if got := testutil.ToFloat64(losses.WithLabelValues(lossPreempted)) - preempted; got != 1 {
+		t.Errorf("preempted losses += %v, want 1", got)
 	}
 	if !isDone(a) {
 		t.Fatal("Done not closed after a refused renewal")
@@ -191,6 +197,7 @@ func TestDeadlineFiresWhileRenewIsStuck(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	timeouts := testutil.ToFloat64(losses.WithLabelValues(lossRenewTimeout))
 	renewed := make(chan error, 1)
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
@@ -205,6 +212,9 @@ func TestDeadlineFiresWhileRenewIsStuck(t *testing.T) {
 	}
 	if a.Remaining() != 0 {
 		t.Fatalf("remaining = %v after the deadline", a.Remaining())
+	}
+	if got := testutil.ToFloat64(losses.WithLabelValues(lossRenewTimeout)) - timeouts; got != 1 {
+		t.Errorf("renew_timeout losses += %v, want 1", got)
 	}
 	select {
 	case err := <-renewed:

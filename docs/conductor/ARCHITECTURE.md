@@ -687,6 +687,55 @@ Every metric answers a stated operational question.
 | `conductor_model_tokens_total` | counter | provider, model, kind | Token use — **absent for local models; must degrade gracefully, never assume `usage` is present**. |
 | `conductor_executor_acquire_duration_seconds` | histogram | kind | Cold-start cost per backend. |
 
+**As built [M5].** Emitted and scraped in the compose stack (`smoke.sh`
+checks for them by name):
+
+- From the controller: every row above except the three below.
+- From the `fake` harness process: `conductor_duplicate_effects_total`, on
+  its own `--metrics-addr`, scraped as job `fake-harness`. Only the fake can
+  see an external effect.
+
+Not emitted yet:
+
+- `conductor_fenced_writes_rejected_total` waits for fenced writes (M7).
+- `conductor_executor_acquire_duration_seconds` waits for the executor (M6).
+- `conductor_model_*` waits for `openaicompat`. Only it knows a provider and
+  a model, and `fake` would give them a fake label.
+
+Decisions made while building it:
+
+- **`conductor_tool_calls_total` counts transitions, by the state entered.**
+  A counter cannot say "unsettled right now", so
+  `conductor_tool_calls_unsettled{state}` is a gauge that the reconciler
+  samples each pass from the `tool_calls_unsettled` index. Every replica
+  reports the same database-wide value: aggregate it with `max`.
+- **Ledger metrics are counted from the transition the database made.** Each
+  `UPDATE` returns the state it left (the row is locked first), so a no-op
+  or refused write counts nothing.
+  - `tool_duration_seconds` is `settled_at − started_at` by the database
+    clock, for results observed live only.
+  - `tool_outcome_unknown_total{resolution}` takes `retried`, `reconciled`
+    (settled from a later-observed result), `abandoned` or
+    `deadline_exceeded`.
+- **`recovery_total{result}`** is `success | failure | held`, where `held`
+  means another owner won the lease.
+- **`recovery_duration_seconds` is the stall**: the run's idle time when the
+  reconciler found it (database clock), plus the recovery itself.
+  `kill_kind` comes from the lease row: `graceful` (released), `ungraceful`
+  (expired) or `none`.
+- **`recovery_skipped_total{reason="harness_not_recoverable"}`** counts each
+  abandoned `recovery: none` run at most once an hour.
+- **`lease_losses_total{reason}`**: `preempted` (the database refused a
+  renewal), `renew_timeout` (a renewal was stuck or failing when the deadline
+  passed), `deadline_elapsed` (otherwise).
+- **`runs_active{owner}`** uses the owner id, `local` on SQLite.
+
+**Logs [M5].** `serve` logs JSON through `telemetry.LogHandler`. It adds the
+attributes a context carries (`conversation_id`, `owner_id`, `generation`,
+set once per `Exec`) and the span's `trace_id` to every record. The recovery
+path logs `recovery.start`, `recovery.rebuild`, `recovery.settle` and
+`recovery.complete` (or `recovery.poisoned`), with counts.
+
 ---
 
 ## 8. Chaos and measurement

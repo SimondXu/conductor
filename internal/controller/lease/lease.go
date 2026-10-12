@@ -26,6 +26,21 @@ import (
 	"context"
 	"errors"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
+)
+
+// Lease metrics (docs/conductor/ARCHITECTURE.md §7.2).
+var (
+	acquisitions = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "conductor_lease_acquisitions_total",
+		Help: "Lease Acquire calls by result: acquired, held or error.",
+	}, []string{"result"})
+	losses = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "conductor_lease_losses_total",
+		Help: "Leases lost while held, by reason: preempted, renew_timeout or deadline_elapsed.",
+	}, []string{"reason"})
 )
 
 var (

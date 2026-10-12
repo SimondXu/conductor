@@ -323,7 +323,7 @@ deleted.
 | Replay cost | Is replay getting more expensive as histories grow? (the panel that justifies snapshots) | `conductor_replay_events_total` |
 | Lease churn | Is ownership stable, or are we flapping? | `conductor_lease_acquisitions_total`, `conductor_lease_losses_total{reason}` |
 | Fenced writes | Did a stale owner try to write, and was it rejected? Direct evidence for I4. | `conductor_fenced_writes_rejected_total` |
-| Tool ledger state | How many calls are unsettled right now, and in which state? | `conductor_tool_calls_total{state}` |
+| Tool ledger state | How many calls are unsettled right now, and in which state? | `conductor_tool_calls_unsettled{state}`, `conductor_tool_calls_total{state}` |
 | Tool retry pressure | Are we re-running tools, and which ones? | `conductor_tool_attempts_total` |
 | Unknown outcomes | How often is a tool outcome genuinely unknown, and how is it resolved? | `conductor_tool_outcome_unknown_total{resolution}` |
 | Duplicate effects | Did an idempotent tool produce a second effect? Direct evidence for I2. | `conductor_duplicate_effects_total` |
@@ -341,7 +341,7 @@ values. Every one is a guess until you have a baseline.
 
 | Alert | Condition | Severity | Why |
 |---|---|---|---|
-| Unsettled tool calls | `conductor_tool_calls_total{state=~"STARTED\|OUTCOME_UNKNOWN"}` > 0 for > `<10m>` | page | A real-world effect is in an unknown state and nothing is resolving it. This is the one that justifies waking someone. |
+| Unsettled tool calls | `max(conductor_tool_calls_unsettled)` > 0 for > `<10m>` | page | A real-world effect is in an unknown state and nothing is resolving it. This is the one that justifies waking someone. |
 | Duplicate effect | `increase(conductor_duplicate_effects_total[5m])` > 0 | page | I2 violated. Should be impossible; treat as a correctness bug, not capacity. |
 | Fenced writes sustained | `rate(conductor_fenced_writes_rejected_total[5m])` > 0 for > `<5m>` | ticket | Fencing is working, but something keeps trying — usually a replica that is alive but partitioned from the DB. |
 | Recovery failing | `increase(conductor_recovery_total{result="failure"}[15m])` > `<3>` | page | Recovery itself is broken; sessions will accumulate. |

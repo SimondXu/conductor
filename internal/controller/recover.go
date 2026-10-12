@@ -17,6 +17,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
 	"github.com/simondxu/conductor/internal/controller/toolledger"
 	"github.com/simondxu/conductor/internal/harness"
@@ -111,6 +112,11 @@ func (d *Controller) recoverCalls(ctx context.Context, gen int64, conversationID
 	}
 	if err := d.planCalls(ctx, gen, harnessID, unplanned); err != nil {
 		return nil, err
+	}
+	if len(answered)+len(calls) > 0 {
+		slog.InfoContext(ctx, "recovery.settle", slog.Int("settled_from_log", len(answered)),
+			slog.Int("unanswered", len(calls)), slog.Int("unplanned", len(unplanned)),
+			slog.Int("outcome_unknown", len(unknown)), slog.Bool("run_fails", fail), slog.String("waiting_on", wait))
 	}
 	if !fail {
 		if wait != "" {

@@ -82,15 +82,13 @@ func (r *Registry) Recovery(id string) Recovery {
 	return r.recovery[id]
 }
 
-// RecoverableHarnesses returns the ids of the RecoveryFull harnesses.
-func (r *Registry) RecoverableHarnesses() []string {
+// HarnessIDs returns the ids of every registered harness.
+func (r *Registry) HarnessIDs() []string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	var ids []string
-	for id, rec := range r.recovery {
-		if rec == RecoveryFull {
-			ids = append(ids, id)
-		}
+	ids := make([]string, 0, len(r.harnesses))
+	for id := range r.harnesses {
+		ids = append(ids, id)
 	}
 	return ids
 }

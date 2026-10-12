@@ -30,11 +30,20 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"google.golang.org/protobuf/types/known/structpb"
 
 	"github.com/simondxu/conductor/internal/harness"
 	"github.com/simondxu/conductor/proto"
 )
+
+// duplicateEffects is the runtime counterpart of I2's falsifying query: only
+// the fake observes external effects, so only it can count a second one.
+var duplicateEffects = promauto.NewCounterVec(prometheus.CounterOpts{
+	Name: "conductor_duplicate_effects_total",
+	Help: "Fake tool effects performed again for an idempotency key that already had one.",
+}, []string{"tool"})
 
 // CrashExitCode is the exit status of a crash_after_effect abort.
 const CrashExitCode = 137
@@ -260,6 +269,9 @@ func (e *execution) toolTurn(ctx context.Context, handler harness.Handler, calls
 			})
 			if err != nil {
 				return fmt.Errorf("fake: recording effect of %q: %w", name, err)
+			}
+			if attempt > 1 {
+				duplicateEffects.WithLabelValues(name).Inc()
 			}
 			if tool.CrashAfterEffect && attempt == 1 {
 				e.h.exit(CrashExitCode)

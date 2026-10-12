@@ -25,6 +25,7 @@ import (
 	"github.com/simondxu/conductor/internal/controller/eventlog"
 	"github.com/simondxu/conductor/internal/controller/lease"
 	"github.com/simondxu/conductor/internal/controller/toolledger"
+	"github.com/simondxu/conductor/internal/telemetry"
 	"github.com/simondxu/conductor/proto"
 )
 
@@ -79,13 +80,20 @@ func (d *Controller) reconcileOnce(ctx context.Context, runs eventlog.RunIndex, 
 	} else if n > 0 {
 		slog.InfoContext(ctx, "Abandoned tool calls past their reconcile_deadline", slog.Int("calls", n))
 	}
-	ids, err := runs.RecoveryCandidates(ctx, d.registry.RecoverableHarnesses(), 4*cfg.Concurrency)
+	unsettled, err := d.ledger.CountUnsettled(ctx)
+	if err != nil {
+		return err
+	}
+	for _, s := range []toolledger.State{toolledger.Started, toolledger.OutcomeUnknown} {
+		toolCallsUnsettled.WithLabelValues(string(s)).Set(float64(unsettled[s]))
+	}
+	cands, err := runs.RecoveryCandidates(ctx, d.registry.HarnessIDs(), 4*cfg.Concurrency)
 	if err != nil {
 		return err
 	}
 	sem := make(chan struct{}, cfg.Concurrency)
 	var wg sync.WaitGroup
-	for _, id := range ids {
+	for _, c := range cands {
 		select {
 		case sem <- struct{}{}:
 		case <-ctx.Done():
@@ -96,7 +104,7 @@ func (d *Controller) reconcileOnce(ctx context.Context, runs eventlog.RunIndex, 
 		go func() {
 			defer wg.Done()
 			defer func() { <-sem }()
-			d.recoverOne(ctx, runs, id, cfg.MaxAttempts)
+			d.recoverOne(ctx, runs, c, cfg.MaxAttempts)
 		}()
 	}
 	wg.Wait()
@@ -106,30 +114,45 @@ func (d *Controller) reconcileOnce(ctx context.Context, runs eventlog.RunIndex, 
 // recoverOne recovers one conversation. The poison guard comes first, in its
 // own committed transaction, so a run whose recovery crashes the process is
 // still counted.
-func (d *Controller) recoverOne(ctx context.Context, runs eventlog.RunIndex, id string, maxAttempts int) {
-	log := slog.With(slog.String("conversation_id", id))
-	n, err := runs.BumpRecoveryAttempt(ctx, id, recoveryBackoff)
-	if err != nil {
-		log.WarnContext(ctx, "Recovery attempt not counted", slog.Any("error", err))
-		return
-	}
-	if n > maxAttempts {
-		if err := d.poison(ctx, id); err != nil && !errors.Is(err, lease.ErrHeld) {
-			log.WarnContext(ctx, "Failed to fail a poisoned run", slog.Any("error", err))
+func (d *Controller) recoverOne(ctx context.Context, runs eventlog.RunIndex, c eventlog.Candidate, maxAttempts int) {
+	id := c.ConversationID
+	lctx := telemetry.WithLogAttrs(ctx, slog.String("conversation_id", id))
+	if c.AgentID != "" && d.registry.Recovery(c.AgentID) != RecoveryFull {
+		// The harness runs its own tool loop: Conductor cannot rebuild it
+		// (correctness.md §0.3). Count it, then leave it alone for an hour.
+		recoverySkipped.WithLabelValues("harness_not_recoverable").Inc()
+		if _, err := runs.BumpRecoveryAttempt(ctx, id, func(int) time.Duration { return time.Hour }); err != nil {
+			slog.WarnContext(lctx, "Skipped run not deferred", slog.Any("error", err))
 		}
 		return
 	}
+	n, err := runs.BumpRecoveryAttempt(ctx, id, recoveryBackoff)
+	if err != nil {
+		slog.WarnContext(lctx, "Recovery attempt not counted", slog.Any("error", err))
+		return
+	}
+	if n > maxAttempts {
+		if err := d.poison(lctx, id); err != nil && !errors.Is(err, lease.ErrHeld) {
+			slog.WarnContext(lctx, "Failed to fail a poisoned run", slog.Any("error", err))
+		}
+		return
+	}
+	slog.InfoContext(lctx, "recovery.start", slog.Int("attempt", n),
+		slog.String("kill_kind", c.KillKind), slog.Float64("idle_seconds", c.Idle.Seconds()))
+	start := time.Now()
 	err = d.Exec(ctx, &proto.CreateInteractionEvent{ConversationId: id}, nil)
+	result := "success"
 	switch {
 	case err == nil:
-		recoveryTotal.WithLabelValues("recovered").Inc()
-		log.InfoContext(ctx, "Recovered run", slog.Int("attempt", n))
+		recoveryDuration.WithLabelValues(c.KillKind).Observe((c.Idle + time.Since(start)).Seconds())
 	case errors.Is(err, lease.ErrHeld):
-		recoveryTotal.WithLabelValues("held").Inc()
+		result = "held"
 	default:
-		recoveryTotal.WithLabelValues("failed").Inc()
-		log.WarnContext(ctx, "Recovery failed", slog.Int("attempt", n), slog.Any("error", err))
+		result = "failure"
 	}
+	recoveryTotal.WithLabelValues(result).Inc()
+	slog.InfoContext(lctx, "recovery.complete", slog.String("result", result), slog.Int("attempt", n),
+		slog.Float64("duration_seconds", time.Since(start).Seconds()), slog.Any("error", err))
 }
 
 // poison fails a PENDING run whose recovery keeps failing. Calls it left
@@ -163,7 +186,7 @@ func (d *Controller) poison(ctx context.Context, id string) error {
 		return err
 	}
 	recoveryPoisoned.Inc()
-	slog.WarnContext(ctx, "Failed a run whose recovery kept failing", slog.String("conversation_id", id))
+	slog.WarnContext(ctx, "recovery.poisoned")
 	return nil
 }
 
