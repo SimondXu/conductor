@@ -19,6 +19,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -41,11 +42,7 @@ import (
 // tool → append. A client span calls a real gRPC server, whose controller
 // runs a fake harness in a local executor subprocess against Postgres.
 func TestTrace_OneTraceFromClientToAppend(t *testing.T) {
-	rec := tracetest.NewSpanRecorder()
-	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec))
-	otel.SetTracerProvider(tp)
-	otel.SetTextMapPropagator(propagation.TraceContext{})
-	t.Cleanup(func() { tp.Shutdown(context.Background()) })
+	rec := spanRecorder()
 
 	c, _ := newPGController(t)
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
@@ -111,3 +108,15 @@ func TestTrace_OneTraceFromClientToAppend(t *testing.T) {
 		t.Error("no gRPC server span in the client's trace")
 	}
 }
+
+// spanRecorder installs one tracer provider for the whole test process.
+// Package-level tracers (controller.tracer) bind to the first global
+// provider and never follow a later SetTracerProvider, so a second run
+// with a fresh provider would lose their spans. Runs share the recorder;
+// the test tells its spans apart by trace id.
+var spanRecorder = sync.OnceValue(func() *tracetest.SpanRecorder {
+	rec := tracetest.NewSpanRecorder()
+	otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec)))
+	otel.SetTextMapPropagator(propagation.TraceContext{})
+	return rec
+})
