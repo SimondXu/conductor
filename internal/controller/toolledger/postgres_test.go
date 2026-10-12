@@ -123,6 +123,35 @@ func TestOutcomeUnknownThenRetry(t *testing.T) {
 	}
 }
 
+// I1's bound: an OUTCOME_UNKNOWN call past its deadline is abandoned; one
+// still STARTED, or within its deadline, is not.
+func TestExpireDeadlines(t *testing.T) {
+	l := openTestLedger(t)
+	ctx := context.Background()
+	expired, started := plan(t, l, 1), plan(t, l, 2)
+	for _, id := range []string{expired, started} {
+		if err := l.Start(ctx, 0, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := l.MarkUnknown(ctx, 0, expired, "turn failed"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := l.db.Exec("UPDATE tool_calls SET reconcile_deadline = now() - interval '1 second' WHERE conversation_id = $1", t.Name()); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := l.ExpireDeadlines(ctx); err != nil || n < 1 {
+		t.Fatalf("ExpireDeadlines = %d, %v; want at least 1", n, err)
+	}
+	calls, err := l.Calls(ctx, t.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls[0].State != Abandoned || calls[0].Error != DeadlineExceeded || calls[1].State != Started {
+		t.Fatalf("calls = %s %q, %s; want ABANDONED %q, STARTED", calls[0].State, calls[0].Error, calls[1].State, DeadlineExceeded)
+	}
+}
+
 func TestIllegalTransitions(t *testing.T) {
 	l := openTestLedger(t)
 	ctx := context.Background()

@@ -39,6 +39,18 @@ var (
 	}, []string{"outcome"})
 )
 
+// Recovery metrics (ARCHITECTURE.md §7.2).
+var (
+	recoveryTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "conductor_recovery_total",
+		Help: "Reconciler recovery attempts by result: recovered, held (another owner won) or failed.",
+	}, []string{"result"})
+	recoveryPoisoned = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "conductor_recovery_poisoned_total",
+		Help: "Runs failed because their recovery kept failing.",
+	})
+)
+
 func runOutcome(err error) string {
 	switch {
 	case err == nil:

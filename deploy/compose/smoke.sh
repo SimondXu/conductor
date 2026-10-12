@@ -40,27 +40,48 @@ effects=$(psql "SELECT count(*) FROM fake_effects e JOIN tool_calls t USING (cal
 settled=$(psql "SELECT count(*) FROM tool_calls WHERE conversation_id = '$conv' AND state = 'SUCCEEDED' AND attempts = 1")
 [[ "$settled" == "2" ]] || fail "tool_calls has $settled settled calls for $conv, want 2"
 
-# Crash and resume (M4): the fake harness dies after charge_card's effect and
-# before its result. The run fails; --resume, with no input and no
-# agent_config, runs the IDEMPOTENT call again under the same key and
-# completes.
+# until <seconds> <sql> <want>: poll psql until it prints want.
+until_eq() {
+  local got
+  for _ in $(seq 1 "$1"); do
+    got=$(psql "$2")
+    [[ "$got" == "$3" ]] && return 0
+    sleep 1
+  done
+  fail "waited $1s for '$3' from: $2 (last: '$got')"
+}
+last_state() { echo "SELECT payload::jsonb->>'state' FROM conversation_log WHERE conversation_id = '$1' ORDER BY step DESC LIMIT 1"; }
+call_of() { echo "SELECT state || ' ' || attempts FROM tool_calls WHERE conversation_id = '$1'"; }
+effects_of() { echo "SELECT count(*) FROM fake_effects e JOIN tool_calls t USING (call_id) WHERE t.conversation_id = '$1'"; }
+
+# Harness crash (M4): the fake harness dies after charge_card's effect and
+# before its result, and the client exits non-zero. With no client, the
+# reconciler runs the IDEMPOTENT call again under the same key and completes
+# the run with the logged agent_config.
 crash="crash-$(date +%s)"
 cfg='{"turns":[{"tool_calls":[{"name":"charge_card","args":{"amount":4200}}]},{"content":"Charged."}],"tools":{"charge_card":{"idempotent":true,"crash_after_effect":true}}}'
 if dc exec -T conductor conductor run --server localhost:8494 --conversation "$crash" --agent-config "$cfg" --input "charge me"; then
   fail "the crashing run succeeded"
 fi
-for _ in $(seq 1 30); do
-  [[ "$(dc ps --format '{{.State}}' fake-harness)" == "running" ]] && break
-  sleep 1
-done
-dc exec -T conductor conductor run --server localhost:8494 --conversation "$crash" --resume
+until_eq 60 "$(last_state "$crash")" "STATE_COMPLETED"
+[[ "$(psql "$(call_of "$crash")")" == "SUCCEEDED 2" ]] || fail "$crash call is '$(psql "$(call_of "$crash")")', want 'SUCCEEDED 2'"
+[[ "$(psql "$(effects_of "$crash")")" == "1" ]] || fail "$crash has $(psql "$(effects_of "$crash")") effects, want 1"
 
-state=$(psql "SELECT payload::jsonb->>'state' FROM conversation_log WHERE conversation_id = '$crash' ORDER BY step DESC LIMIT 1")
-[[ "$state" == "STATE_COMPLETED" ]] || fail "resumed run's final state is '$state', want STATE_COMPLETED"
-call=$(psql "SELECT state || ' ' || attempts FROM tool_calls WHERE conversation_id = '$crash'")
-[[ "$call" == "SUCCEEDED 2" ]] || fail "resumed call is '$call', want 'SUCCEEDED 2'"
-effects=$(psql "SELECT count(*) FROM fake_effects e JOIN tool_calls t USING (call_id) WHERE t.conversation_id = '$crash'")
-[[ "$effects" == "1" ]] || fail "resumed run has $effects effects, want 1"
+# Controller killed mid-tool-call (M4 DoD): SIGKILL the controller while the
+# call is STARTED, then start it again. With no client attached, the new
+# process takes the run over once the dead one's lease expires and completes
+# it at a higher generation.
+killed="killed-$(date +%s)"
+cfg='{"turns":[{"tool_calls":[{"name":"charge_card","args":{"amount":4200}}]},{"content":"Charged."}],"tools":{"charge_card":{"idempotent":true,"delay_ms":5000}}}'
+dc exec -d -T fake-harness conductor run --server conductor:8494 --conversation "$killed" --agent-config "$cfg" --input "charge me"
+until_eq 30 "SELECT state FROM tool_calls WHERE conversation_id = '$killed'" "STARTED"
+dc kill -s SIGKILL conductor
+dc start conductor
+until_eq 90 "$(last_state "$killed")" "STATE_COMPLETED"
+[[ "$(psql "$(call_of "$killed")")" == "SUCCEEDED 2" ]] || fail "$killed call is '$(psql "$(call_of "$killed")")', want 'SUCCEEDED 2'"
+[[ "$(psql "$(effects_of "$killed")")" == "1" ]] || fail "$killed has $(psql "$(effects_of "$killed")") effects, want 1"
+gen=$(psql "SELECT generation FROM tool_calls WHERE conversation_id = '$killed'")
+(( gen > 1 )) || fail "$killed call settled at generation $gen, want > 1"
 
 # Falsifying queries from docs/conductor/correctness.md; each must be empty.
 check() {
@@ -84,4 +105,4 @@ for _ in $(seq 1 12); do
 done
 [[ -n "$runs" && "$runs" != "0" ]] || fail "Prometheus has no completed runs"
 
-echo "PASS: $conv completed with $steps log rows and $settled settled calls; $crash resumed after a crash with one effect over two attempts; I1, I2, I7b hold; Prometheus sees $runs completed run(s)"
+echo "PASS: $conv completed with $steps log rows and $settled settled calls; $crash (harness crash) and $killed (controller SIGKILL) recovered by the reconciler with one effect over two attempts; I1, I2, I7b hold; Prometheus sees $runs completed run(s)"

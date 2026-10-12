@@ -242,6 +242,14 @@ without which a late or retried write pushes the projection backwards.
 Recovery uses `runs` **only to discover candidates**. Truth is always re-derived
 by `rebuild(events)` (I7a).
 
+**As built [M4]** (migration 0005), two columns are dropped. `harness_recovery`
+cannot be derived from the log, so keeping it would break I7a; the reconciler
+passes this replica's `recovery: full` harness ids to the discovery query
+instead. `generation` waits for fenced appends (M7). `recovery_attempts` and
+`next_attempt_at` are the reconciler's bookkeeping, not projected columns;
+I7a compares `state`, `agent_id` and `last_step`. The migration backfills
+`runs` from the log with the same derivation the I7a test checks against.
+
 ### 2.4 Tool ledger
 
 ```sql
@@ -464,6 +472,35 @@ One loop per replica: 5 s poll with jitter, bounded concurrency (4),
 `FOR UPDATE SKIP LOCKED` so replicas do not pile onto the same head row. A
 client reconnect calls the same `recoverOne(convID)` as a latency optimisation,
 never a second code path.
+
+**As built [M4]** (`internal/controller/reconciler.go`):
+
+- **Sources A and B are one query**, `RecoveryCandidates`
+  (`eventlog/runs.go`): PENDING `runs` ∪ conversations with a `STARTED` or
+  `OUTCOME_UNKNOWN` call, restricted to this replica's `recovery: full`
+  harnesses, with backoff elapsed and lease absent or expired. A call with no
+  `runs` row has no backoff to record, so it is ordered last rather than
+  starving the rest. `UnsettledAnywhere` is not a separate ledger method.
+- **No `FOR UPDATE SKIP LOCKED`.** The lease is the lock: `Acquire` is one
+  conditional statement, and the replica that loses gets `ErrHeld` and moves
+  on.
+- **`recoverOne` is `Exec` with no input.** The lease, `rebuild`, the
+  terminal-state short circuit and `recoverCalls` are the same code a
+  client's `--resume` runs. There is no separate recovery path.
+- **Every `Exec` on PostgreSQL holds the conversation's lease**, not only the
+  reconciler's. Otherwise the reconciler would take over a run a client is
+  driving: its lease row is absent. A client that loses the race gets gRPC
+  `FAILED_PRECONDITION`. Ledger writes carry the lease's generation. Appends
+  are not fenced on it yet (M7).
+- **Each pass runs `ExpireDeadlines` first**, which bounds I1.
+- **Poison:** after `MaxAttempts` (5) recoveries, the run is failed by
+  appending `STATE_FAILED` under its lease, never by writing `runs` directly.
+  Its `STARTED` calls become `OUTCOME_UNKNOWN`, so their deadline still bounds
+  them. `recovery_attempts` is never reset, so a run gets 5 recoveries in its
+  lifetime. Backoff is 5 s doubling, capped at 5 min.
+- **`serve` runs the loop on PostgreSQL only.** On SQLite it logs that
+  ownership is process-local. `eventlog.postgres.lease_ttl` (default 30 s)
+  sets how long a killed controller's runs wait; compose uses 5 s.
 
 No `LISTEN/NOTIFY`: it adds a connection-state failure mode whose benefit is
 unmeasurable, and a notification lost in the very crash under test would

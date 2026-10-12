@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/simondxu/conductor/internal/controller/toolledger"
 	"github.com/simondxu/conductor/internal/harness"
@@ -84,6 +85,9 @@ type SQLiteConfig struct {
 // PostgresConfig configures the Postgres event log.
 type PostgresConfig struct {
 	DSN string `yaml:"dsn"` // Postgres connection DSN
+	// LeaseTTL is how long a conversation lease lasts without renewal, so
+	// how long a killed controller's runs wait before recovery. Default 30s.
+	LeaseTTL time.Duration `yaml:"lease_ttl,omitempty"`
 }
 
 // EventLogConfig configures the event log storage.

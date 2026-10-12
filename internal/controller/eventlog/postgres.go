@@ -25,6 +25,14 @@ import (
 	schema "github.com/simondxu/conductor/db"
 )
 
+// Postgres is the PostgreSQL event log. It keeps the runs projection and is
+// the reconciler's RunIndex.
+type Postgres struct {
+	*sqlEventLog
+}
+
+var _ RunIndex = (*Postgres)(nil)
+
 // OpenPostgresEventLog connects to the PostgreSQL database described by dsn and
 // checks that its schema is at db.SchemaVersion. Caller is responsible to ensure
 // it is safe for concurrent use.
@@ -56,5 +64,5 @@ func OpenPostgresEventLog(dsn string) (EventLog, error) {
 			version, dirty, schema.SchemaVersion)
 	}
 
-	return &sqlEventLog{db: db}, nil
+	return &Postgres{&sqlEventLog{db: db, projectRuns: true}}, nil
 }
