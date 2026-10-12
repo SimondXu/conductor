@@ -335,6 +335,7 @@ func newPodHarness(c config.PodExecutorConfig) (harness.Harness, error) {
 	if c.Secret != "" {
 		cmd = append(cmd, "--effects-dsn", "$(CONDUCTOR_DSN)") // expanded by the kubelet
 	}
-	p := &executor.Pod{Client: cs, Namespace: ns, Image: c.Image, Command: cmd, Port: 50053, EnvFrom: c.Secret, GracePeriod: grace}
+	p := &executor.Pod{Client: cs, Namespace: ns, Image: c.Image, Command: cmd, Port: 50053, EnvFrom: c.Secret, GracePeriod: grace,
+		RuntimeClass: c.RuntimeClass}
 	return &executor.Harness{Executor: p, AgentID: config.FakeHarnessID}, nil
 }

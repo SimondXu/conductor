@@ -826,8 +826,9 @@ model gateway. If you need any of the following, Conductor is not where it lives
   and it blocks in-process. If your CLI dies, a pending approval is lost. This
   is a known gap, not a feature in progress.
 - **Sandboxing or isolation guarantees.** Tools run with the privileges of the
-  harness process. gVisor `RuntimeClass` support is P1, and even then isolation
-  is the cluster's property, not Conductor's.
+  harness process. Since P1 the pod executor can run harnesses under gVisor
+  (`runtime_class: gvisor`), and even then isolation is the cluster's
+  property, not Conductor's.
 - **A Kubernetes operator or CRD.** The executor owns Pod lifecycle — create,
   wait ready, connect, drain, delete. It is not a controller-runtime operator,
   it defines no custom resources, and it does not schedule or autoscale.

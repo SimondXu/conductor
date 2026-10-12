@@ -149,6 +149,9 @@ type PodExecutorConfig struct {
 	// GracePeriodSeconds is how long a deleted harness pod keeps running.
 	// Default 5.
 	GracePeriodSeconds int64 `yaml:"grace_period_seconds,omitempty"`
+	// RuntimeClass is the harness pods' runtimeClassName, e.g. gvisor (see
+	// deploy/k8s/gvisor.yaml). Empty for the cluster's default runtime.
+	RuntimeClass string `yaml:"runtime_class,omitempty"`
 }
 
 // ToolConfig declares a tool's recovery class (IDEMPOTENT, RECONCILABLE or

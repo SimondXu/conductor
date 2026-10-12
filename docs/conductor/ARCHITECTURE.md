@@ -454,6 +454,33 @@ cluster, and "kept for compatibility" is a maintenance promise this project
 cannot honour. The `substrate` harness package stays in the tree, unwired, and
 documented as unsupported; Apache-2.0 attribution is unaffected.
 
+**As built [P1]: gVisor.**
+
+- **Configuration.** `registry.fake.pod.runtime_class` becomes the harness
+  pods' `runtimeClassName`. `deploy/k8s/gvisor.yaml` is the `RuntimeClass`
+  `gvisor`, with handler `runsc`. Nothing else changes: the pod lifecycle,
+  fencing and recovery are the same.
+- **The e2e.** `GVISOR=1 deploy/k8s/kind-e2e.sh`:
+  1. Installs `runsc` and its containerd shim on the kind node. gVisor
+     ships each release as one `gvisor.tar.bz2`, and the `latest/runsc`
+     URLs older guides give return 404. So the script fetches the pinned
+     release's tarball (`GVISOR_RELEASE`, default 20260928) on the host,
+     sha512-checks it, and copies runsc's directory into the node's
+     `/usr/local/bin`, along with the shim. Copying the directory matters:
+     current runsc starts its sentry from `gvisor-bin/` beside itself, and
+     with only the binary the sandbox fails ("sidecar gvisor_sentry not
+     usable").
+  2. Registers the `runsc` handler with containerd.
+  3. Runs the M6 assertion (delete the harness pod mid-tool-call; the run
+     recovers and completes) with `runtime_class: gvisor`.
+  4. Before deleting the pod, requires that it has `runtimeClassName:
+     gvisor` and that its kernel is gVisor's, by its `dmesg` or its fixed
+     `/proc/version`.
+- **Where it is checked.** The CI job `pod-executor-gvisor` runs the e2e.
+- **What isolation means here.** It is the runtime's, not Conductor's: a
+  tool still runs with the harness's privileges, inside the sandbox
+  (PRD §10).
+
 **As built [M6]** (`internal/executor`):
 
 - **`executor.Harness` adapts an `Executor` to `harness.Harness`.** `Start`
@@ -1116,7 +1143,9 @@ all, rather than one whose `Acquire` returns `ErrUnsupported`. There is no
 - `serve` refuses to start when `CONDUCTOR_REPLICAS > 1` and the event log
   is SQLite.
 - `doctor --config` prints `ownership=postgres-lease` or
-  `ownership=process-local`.
+  `ownership=process-local`. It also prints one `recovery=` line per
+  configured harness (PRD §6.5), from the config alone, without starting
+  any harness.
 - `serve` takes PRD §5's `--owner-id` and `--lease-ttl`, which override
   `eventlog.postgres.owner_id` and `lease_ttl`, and `--recovery-interval`
   and `--recovery-concurrency`.
