@@ -824,6 +824,7 @@ INVARIANTS
   I7a   runs projection == rebuild from log                      <int>    <int>
   I7b   tool_calls terminal states consistent with log           <int>    <int>
   I8    no Conductor-owned UNSAFE start inside lease margin      <int>    <int>
+  I11   a model turn is logged whole, as one event               <int>    <int>
   --------------------------------------------------------------------------------
   TOTAL                                                          <int>    <int>
 

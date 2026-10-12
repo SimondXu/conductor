@@ -117,6 +117,7 @@ var sqlChecks = []sqlCheck{{
 func Check(ctx context.Context, db *sql.DB, prefix string) ([]Result, error) {
 	scope := prefix + "%"
 	var out []Result
+	var i11 Result
 	for _, c := range sqlChecks {
 		r := Result{ID: c.id, Assertion: c.assertion, Check: c.check}
 		if err := db.QueryRowContext(ctx, c.checks, scope).Scan(&r.Checks); err != nil {
@@ -134,14 +135,15 @@ func Check(ctx context.Context, db *sql.DB, prefix string) ([]Result, error) {
 			out = append(out, i4)
 		}
 		if c.id == "I5" {
-			i6, err := checkRebuild(ctx, db, scope)
-			if err != nil {
-				return nil, fmt.Errorf("I6: %w", err)
+			var i6 Result
+			var err error
+			if i6, i11, err = checkHistories(ctx, db, scope); err != nil {
+				return nil, fmt.Errorf("I6/I11: %w", err)
 			}
 			out = append(out, i6)
 		}
 	}
-	return out, nil
+	return append(out, i11), nil // I11 last, in correctness.md order
 }
 
 func violations(ctx context.Context, db *sql.DB, query, scope string, r *Result) error {
@@ -212,19 +214,32 @@ func probeFence(ctx context.Context, db *sql.DB, scope string) (Result, error) {
 	return r, nil
 }
 
-// checkRebuild is I6 as far as durable state can show it: what the
-// controller decided in memory must be what rebuild(log) gives. A run it
-// ended COMPLETED or FAILED must rebuild to a history with every tool call
-// answered, and a COMPLETED one to a history that needs no further turn.
-// It does not test that rebuild is pure; that is a unit-test matter.
-func checkRebuild(ctx context.Context, db *sql.DB, scope string) (Result, error) {
-	r := Result{ID: "I6", Assertion: "rebuild(log) == post-recovery state", Check: "terminal run rebuilds to a closed history"}
+// checkHistories reads each conversation's log once for two checks.
+//
+// I6, as far as durable state can show it: what the controller decided in
+// memory must be what rebuild(log) gives. A run it ended COMPLETED or FAILED
+// must rebuild to a history with every tool call answered, and a COMPLETED
+// one to a history that needs no further turn. It does not test that rebuild
+// is pure; that is a unit-test matter.
+//
+// I11: a model turn is one event. No two consecutive events that carry steps
+// may both hold only model output (the turn was split), and a COMPLETED run
+// must not end in a thought (a turn cut short).
+func checkHistories(ctx context.Context, db *sql.DB, scope string) (i6, i11 Result, err error) {
+	i6 = Result{ID: "I6", Assertion: "rebuild(log) == post-recovery state", Check: "terminal run rebuilds to a closed history"}
+	i11 = Result{ID: "I11", Assertion: "a model turn is logged whole, as one event", Check: "adjacent model-output events, or COMPLETED ending in a thought"}
 	rows, err := db.QueryContext(ctx, `SELECT conversation_id, payload FROM conversation_log
 		WHERE conversation_id LIKE $1 ORDER BY conversation_id, step`, scope)
 	if err != nil {
-		return r, err
+		return i6, i11, err
 	}
 	defer rows.Close()
+	violate := func(r *Result, conv string) {
+		r.Violations++
+		if len(r.Examples) < maxExamples {
+			r.Examples = append(r.Examples, conv)
+		}
+	}
 	var conv string
 	var events []*proto.StepEvent
 	flush := func() error {
@@ -235,37 +250,60 @@ func checkRebuild(ctx context.Context, db *sql.DB, scope string) (Result, error)
 		if err != nil {
 			return fmt.Errorf("rebuild %s: %w", conv, err)
 		}
+		if splitTurn(events) || (state == proto.State_STATE_COMPLETED && len(history) > 0 && history[len(history)-1].GetThought() != nil) {
+			violate(&i11, conv)
+		}
+		i11.Checks++
 		if state != proto.State_STATE_COMPLETED && state != proto.State_STATE_FAILED {
 			return nil
 		}
-		r.Checks++
+		i6.Checks++
 		if len(harness.UnansweredToolCalls(history)) > 0 || (state == proto.State_STATE_COMPLETED && harness.NeedsTurn(history)) {
-			r.Violations++
-			if len(r.Examples) < maxExamples {
-				r.Examples = append(r.Examples, conv)
-			}
+			violate(&i6, conv)
 		}
 		return nil
 	}
 	for rows.Next() {
 		var id, payload string
 		if err := rows.Scan(&id, &payload); err != nil {
-			return r, err
+			return i6, i11, err
 		}
 		if id != conv {
 			if err := flush(); err != nil {
-				return r, err
+				return i6, i11, err
 			}
 			conv, events = id, nil
 		}
 		ev := &proto.StepEvent{}
 		if err := (protojson.UnmarshalOptions{DiscardUnknown: true}).Unmarshal([]byte(payload), ev); err != nil {
-			return r, fmt.Errorf("decode %s: %w", id, err)
+			return i6, i11, fmt.Errorf("decode %s: %w", id, err)
 		}
 		events = append(events, ev)
 	}
 	if err := rows.Err(); err != nil {
-		return r, err
+		return i6, i11, err
 	}
-	return r, flush()
+	return i6, i11, flush()
+}
+
+// splitTurn reports whether two consecutive events that carry steps both
+// hold only model output: thoughts, assistant content and tool calls.
+func splitTurn(events []*proto.StepEvent) bool {
+	prevOutput := false
+	for _, ev := range events {
+		if len(ev.GetSteps()) == 0 {
+			continue
+		}
+		output := true
+		for _, s := range ev.GetSteps() {
+			if s.GetThought() == nil && s.GetToolCall() == nil && s.GetContent().GetRole() != "assistant" {
+				output = false
+			}
+		}
+		if output && prevOutput {
+			return true
+		}
+		prevOutput = output
+	}
+	return false
 }

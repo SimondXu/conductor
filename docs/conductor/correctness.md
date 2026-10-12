@@ -424,7 +424,13 @@ result, because each result settles its own call (I7b).
 dies after the first step of a model turn reaches the controller; the log
 must hold only the user input, and a resume must make the call once and end
 with the final answer. `TestOwnedLoop_RunsScriptToCompletion` checks the
-event shape.
+event shape. `make bench` also checks every run it made
+(`internal/invariant`): no two consecutive step-carrying events may both
+hold only model output, and no `COMPLETED` run may end in a thought. Under
+per-step logging every run with a thought and a call fails the first
+check. No bench failure class kills the controller inside a model turn, so
+the bench shows the shape holds under load, not recovery from that crash;
+the unit test covers the crash.
 
 ---
 
