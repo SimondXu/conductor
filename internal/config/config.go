@@ -117,12 +117,18 @@ type FakeHarnessConfig struct {
 	// process. Empty runs the harness in-process.
 	Endpoint string `yaml:"endpoint,omitempty"`
 	// EffectsDSN is a Postgres DSN for the fake_effects table, expanded with
-	// os.ExpandEnv. Empty records effects in memory. In-process only; a remote
-	// harness takes its own --effects-dsn.
+	// os.ExpandEnv. Empty records effects in memory. Used in-process and by
+	// the local executor's subprocesses; a remote harness takes its own
+	// --effects-dsn.
 	EffectsDSN string `yaml:"effects_dsn,omitempty"`
 	// Tools declares the recovery class of the script's tools. Empty declares
 	// the default script's (charge_card IDEMPOTENT, send_email UNSAFE).
 	Tools []ToolConfig `yaml:"tools,omitempty"`
+	// Executor runs every execution in its own environment
+	// (ARCHITECTURE.md §5.4): "local" starts a `conductor harness fake`
+	// subprocess per conversation, which takes EffectsDSN. Empty uses
+	// Endpoint or runs in-process.
+	Executor string `yaml:"executor,omitempty"`
 }
 
 // ToolConfig declares a tool's recovery class (IDEMPOTENT, RECONCILABLE or
@@ -390,6 +396,16 @@ func (c *Config) Validate() error {
 		if sc.Default {
 			defaultCount++
 		}
+	}
+
+	switch c.Registry.Fake.Executor {
+	case "":
+	case "local":
+		if c.Registry.Fake.Endpoint != "" {
+			return fmt.Errorf("registry.fake: endpoint and executor are mutually exclusive")
+		}
+	default:
+		return fmt.Errorf("registry.fake.executor %q: want local", c.Registry.Fake.Executor)
 	}
 
 	for _, tc := range c.Registry.Fake.Tools {

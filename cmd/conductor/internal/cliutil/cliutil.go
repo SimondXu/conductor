@@ -25,6 +25,7 @@ import (
 	"github.com/simondxu/conductor/internal/controller/eventlog"
 	"github.com/simondxu/conductor/internal/controller/lease"
 	"github.com/simondxu/conductor/internal/controller/toolledger"
+	"github.com/simondxu/conductor/internal/executor"
 	"github.com/simondxu/conductor/internal/harness"
 	"github.com/simondxu/conductor/internal/harness/antigravity"
 	"github.com/simondxu/conductor/internal/harness/antigravityinteractions"
@@ -274,6 +275,17 @@ func NewControllerFromConfig(ctx context.Context, cfg *Config) (*controller.Cont
 // newFakeHarness builds the fake harness: a client of a remote
 // `conductor harness fake` when Endpoint is set, in-process otherwise.
 func newFakeHarness(ctx context.Context, c config.FakeHarnessConfig) (harness.Harness, error) {
+	if c.Executor == "local" {
+		exe, err := os.Executable()
+		if err != nil {
+			return nil, err
+		}
+		cmd := []string{exe, "harness", "fake"}
+		if c.EffectsDSN != "" {
+			cmd = append(cmd, "--effects-dsn", os.ExpandEnv(c.EffectsDSN))
+		}
+		return &executor.Harness{Executor: &executor.Local{Command: cmd}, AgentID: config.FakeHarnessID}, nil
+	}
 	if c.Endpoint != "" {
 		return remote.NewHarness(c.Endpoint, config.FakeHarnessID)
 	}
