@@ -126,9 +126,26 @@ type FakeHarnessConfig struct {
 	Tools []ToolConfig `yaml:"tools,omitempty"`
 	// Executor runs every execution in its own environment
 	// (ARCHITECTURE.md §5.4): "local" starts a `conductor harness fake`
-	// subprocess per conversation, which takes EffectsDSN. Empty uses
-	// Endpoint or runs in-process.
-	Executor string `yaml:"executor,omitempty"`
+	// subprocess per conversation, which takes EffectsDSN; "pod" starts a pod
+	// per conversation, configured by Pod. Empty uses Endpoint or runs
+	// in-process.
+	Executor string            `yaml:"executor,omitempty"`
+	Pod      PodExecutorConfig `yaml:"pod,omitempty"`
+}
+
+// PodExecutorConfig configures the pod executor. The controller must run in
+// the cluster, with a service account allowed to manage pods in Namespace.
+type PodExecutorConfig struct {
+	// Namespace defaults to the controller's own.
+	Namespace string `yaml:"namespace,omitempty"`
+	// Image is the conductor image the harness pods run.
+	Image string `yaml:"image"`
+	// Secret, when set, is a Secret whose keys become the harness pod's
+	// environment; with it the harness records effects in CONDUCTOR_DSN.
+	Secret string `yaml:"secret,omitempty"`
+	// GracePeriodSeconds is how long a deleted harness pod keeps running.
+	// Default 5.
+	GracePeriodSeconds int64 `yaml:"grace_period_seconds,omitempty"`
 }
 
 // ToolConfig declares a tool's recovery class (IDEMPOTENT, RECONCILABLE or
@@ -400,12 +417,15 @@ func (c *Config) Validate() error {
 
 	switch c.Registry.Fake.Executor {
 	case "":
-	case "local":
+	case "local", "pod":
 		if c.Registry.Fake.Endpoint != "" {
 			return fmt.Errorf("registry.fake: endpoint and executor are mutually exclusive")
 		}
+		if c.Registry.Fake.Executor == "pod" && c.Registry.Fake.Pod.Image == "" {
+			return fmt.Errorf("registry.fake.pod.image is required")
+		}
 	default:
-		return fmt.Errorf("registry.fake.executor %q: want local", c.Registry.Fake.Executor)
+		return fmt.Errorf("registry.fake.executor %q: want local or pod", c.Registry.Fake.Executor)
 	}
 
 	for _, tc := range c.Registry.Fake.Tools {

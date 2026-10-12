@@ -454,6 +454,43 @@ cluster, and "kept for compatibility" is a maintenance promise this project
 cannot honour. The `substrate` harness package stays in the tree, unwired, and
 documented as unsupported; Apache-2.0 attribution is unaffected.
 
+**As built [M6]** (`internal/executor`):
+
+- **`executor.Harness` adapts an `Executor` to `harness.Harness`.** `Start`
+  acquires an environment and dials it with `internal/harness/remote`;
+  closing the execution releases it. So there is one environment per `Exec`,
+  that is, per ownership generation. `Start` is frozen, so the generation
+  reaches `Acquire` through the context (`executor.WithGeneration`, set by
+  the controller next to its lease).
+- **`Release(ctx, conversationID, gen)` takes the generation**, unlike the
+  signature above. A stale owner's late release must not remove the newer
+  owner's environment.
+- **`local`** runs `conductor harness fake --port 0` per conversation and
+  reads the address from its log. A newer acquisition replaces the older
+  subprocess. On Linux the child gets `Pdeathsig`, so a SIGKILLed controller
+  leaves no orphans. Config: `registry.fake.executor: local`.
+- **`pod`** (in-cluster only: the controller dials pod IPs) uses the core/v1
+  typed client, not the full clientset, which made the binary 12 MB larger
+  on its own. client-go still grows it from 41 MB to 76 MB.
+  - **Pods**: one per conversation and generation, named
+    `harness-<hash>-g<gen>`. Labels: the conversation hash, the generation,
+    and `app.kubernetes.io/component=harness`. The conversation id goes in
+    an annotation.
+  - **Spec**: `restartPolicy: Never`, because a dead harness is replaced by
+    the reconciler at the next generation, never restarted in place. A gRPC
+    readiness probe gates readiness.
+  - **`Acquire`** deletes the conversation's pods of other generations and
+    waits until they are gone or their grace period is over, then creates
+    its own and watches it until ready. Fencing stays with the ledger: §6.2.
+  - **Config**: `registry.fake.executor: pod` with `pod.image`,
+    `pod.secret` (env for the harness, e.g. `CONDUCTOR_DSN`) and
+    `pod.grace_period_seconds` (default 5).
+  - **Manifests**: `deploy/k8s/conductor.yaml` holds PostgreSQL, the
+    controller, and a Role limited to pods in its namespace.
+- **DoD**: `deploy/k8s/kind-e2e.sh`, also run in CI as the `Kind` workflow.
+  It deletes the harness pod while the call is STARTED, and the reconciler
+  completes the run in a new pod at the next generation (`SUCCEEDED 2`).
+
 ### 5.5 Harness — unchanged
 
 `harness.Harness` / `Execution` / `Handler` stay exactly as upstream defines
@@ -723,15 +760,17 @@ Every metric answers a stated operational question.
 **As built [M5].** Emitted and scraped in the compose stack (`smoke.sh`
 checks for them by name):
 
-- From the controller: every row above except the three below.
+- From the controller: every row above except the ones below.
 - From the `fake` harness process: `conductor_duplicate_effects_total`, on
   its own `--metrics-addr`, scraped as job `fake-harness`. Only the fake can
   see an external effect.
+- Since M7: `conductor_fenced_writes_rejected_total`.
+- Since M6: `conductor_executor_acquire_duration_seconds`. It is emitted only
+  where an executor is configured; the compose stack dials a fixed harness,
+  so it does not have it.
 
 Not emitted yet:
 
-- `conductor_fenced_writes_rejected_total` waits for fenced writes (M7).
-- `conductor_executor_acquire_duration_seconds` waits for the executor (M6).
 - `conductor_model_*` waits for `openaicompat`. Only it knows a provider and
   a model, and `fake` would give them a fake label.
 

@@ -1,0 +1,155 @@
+# Copyright 2026 Simon Xu
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Conductor on plain Kubernetes with the pod executor (PLAN.md block ③):
+# PostgreSQL, one controller, and one harness pod per conversation, created
+# and deleted by the controller. No CRD, no operator. Used by kind-e2e.sh.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: conductor
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: conductor-db
+  namespace: conductor
+stringData:
+  CONDUCTOR_DSN: postgres://conductor:conductor@postgres:5432/conductor?sslmode=disable
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: conductor
+spec:
+  selector: {matchLabels: {app: postgres}}
+  template:
+    metadata:
+      labels: {app: postgres}
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:17
+          env:
+            - {name: POSTGRES_USER, value: conductor}
+            - {name: POSTGRES_PASSWORD, value: conductor}
+            - {name: POSTGRES_DB, value: conductor}
+          ports: [{containerPort: 5432}]
+          readinessProbe:
+            exec: {command: [pg_isready, -U, conductor]}
+            periodSeconds: 2
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: conductor
+spec:
+  selector: {app: postgres}
+  ports: [{port: 5432}]
+---
+# The controller creates, watches and deletes harness pods in its namespace,
+# and nothing else.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: conductor
+  namespace: conductor
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: conductor-harness-pods
+  namespace: conductor
+rules:
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, watch, create, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: conductor-harness-pods
+  namespace: conductor
+subjects:
+  - {kind: ServiceAccount, name: conductor, namespace: conductor}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: conductor-harness-pods
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: conductor-config
+  namespace: conductor
+data:
+  conductor.yaml: |
+    version: v1alpha
+    server:
+      address: 0.0.0.0:8494
+    eventlog:
+      postgres:
+        dsn: ${CONDUCTOR_DSN}
+        lease_ttl: 5s
+    registry:
+      antigravity:
+        disabled: true
+      fake:
+        default: true
+        executor: pod
+        pod:
+          image: conductor:dev
+          secret: conductor-db
+          # Short, so a deleted harness dies mid-tool-call in kind-e2e.sh.
+          grace_period_seconds: 2
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: conductor
+  namespace: conductor
+spec:
+  selector: {matchLabels: {app: conductor}}
+  template:
+    metadata:
+      labels: {app: conductor}
+    spec:
+      serviceAccountName: conductor
+      containers:
+        - name: conductor
+          image: conductor:dev
+          imagePullPolicy: IfNotPresent
+          workingDir: /etc/conductor
+          command: [sh, -c, "conductor migrate up && exec conductor serve"]
+          envFrom: [{secretRef: {name: conductor-db}}]
+          ports: [{containerPort: 8494}, {containerPort: 9090}]
+          readinessProbe:
+            httpGet: {path: /metrics, port: 9090}
+            periodSeconds: 2
+          volumeMounts:
+            - {name: config, mountPath: /etc/conductor}
+      volumes:
+        - name: config
+          configMap: {name: conductor-config}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: conductor
+  namespace: conductor
+spec:
+  selector: {app: conductor}
+  ports: [{port: 8494}]
