@@ -2,7 +2,7 @@
   "uid": "conductor-runtime",
   "title": "Conductor / Runtime",
   "schemaVersion": 39,
-  "version": 1,
+  "version": 2,
   "editable": true,
   "time": {
     "from": "now-30m",
@@ -12,8 +12,9 @@
   "panels": [
     {
       "id": 1,
-      "type": "timeseries",
-      "title": "Runs active",
+      "type": "stat",
+      "title": "Last recovery",
+      "description": "How long did the last recovery take, and how many tool attempts did it involve? From the replica that recovered most recently.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -30,28 +31,44 @@
         },
         "overrides": []
       },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom"
-        }
-      },
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(conductor_runs_active)",
-          "legendFormat": "active",
+          "expr": "max(conductor_last_recovery_duration_seconds and on(instance) topk(1, conductor_last_recovery_timestamp_seconds))",
+          "legendFormat": "stalled for",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        },
+        {
+          "refId": "B",
+          "expr": "max(conductor_last_recovery_tool_attempts and on(instance) topk(1, conductor_last_recovery_timestamp_seconds))",
+          "legendFormat": "tool attempts",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
           }
         }
-      ]
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value_and_name"
+      }
     },
     {
       "id": 2,
       "type": "timeseries",
-      "title": "Runs finished per second",
+      "title": "Tool ledger state",
+      "description": "How many calls are unsettled right now, and in which state? Every replica samples the same table: max, not sum.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -64,32 +81,33 @@
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "ops"
+          "unit": "short"
         },
         "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom"
-        }
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (outcome) (rate(conductor_runs_total[1m]))",
-          "legendFormat": "{{outcome}}",
+          "expr": "max by (state) (conductor_tool_calls_unsettled)",
+          "legendFormat": "{{state}}",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
           }
         }
-      ]
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
     },
     {
       "id": 3,
       "type": "timeseries",
-      "title": "Run duration",
+      "title": "Recovery",
+      "description": "Did anything recover recently, and did it succeed?",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -102,15 +120,183 @@
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "s"
+          "unit": "short"
         },
         "overrides": []
       },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (result) (increase(conductor_recovery_total[5m]))",
+          "legendFormat": "{{result}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        },
+        {
+          "refId": "B",
+          "expr": "sum(increase(conductor_recovery_poisoned_total[5m]))",
+          "legendFormat": "poisoned",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        },
+        {
+          "refId": "C",
+          "expr": "sum by (reason) (increase(conductor_recovery_skipped_total[1h]))",
+          "legendFormat": "skipped: {{reason}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
       "options": {
         "legend": {
           "displayMode": "list",
           "placement": "bottom"
         }
+      }
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Recovery stall (p95)",
+      "description": "How long were recovered sessions stalled, after a graceful vs an ungraceful loss?",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le, kill_kind) (rate(conductor_recovery_duration_seconds_bucket[15m])))",
+          "legendFormat": "{{kill_kind}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Active runs by owner",
+      "description": "How is work distributed across replicas, and did a replica stop taking work?",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 16
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (owner) (conductor_runs_active)",
+          "legendFormat": "{{owner}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Run outcomes",
+      "description": "What fraction of runs complete vs fail vs cancel?",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 16
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (outcome) (rate(conductor_runs_total[1m]))",
+          "legendFormat": "{{outcome}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Run duration",
+      "description": "Is end-to-end latency drifting?",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 24
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
       },
       "targets": [
         {
@@ -140,12 +326,19 @@
             "uid": "prometheus"
           }
         }
-      ]
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
     },
     {
-      "id": 4,
+      "id": 8,
       "type": "timeseries",
-      "title": "Goroutines",
+      "title": "Replay cost",
+      "description": "Is replay getting more expensive as histories grow? (the panel that justifies snapshots)",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -154,7 +347,94 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 8
+        "y": 24
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(conductor_replay_events_total[5m]))",
+          "legendFormat": "events/s",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Lease churn",
+      "description": "Is ownership stable, or are we flapping?",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 32
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (result) (rate(conductor_lease_acquisitions_total[5m]))",
+          "legendFormat": "acquire: {{result}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (reason) (rate(conductor_lease_losses_total[5m]))",
+          "legendFormat": "lost: {{reason}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Fenced writes",
+      "description": "Did a stale owner try to write, and was it rejected? Direct evidence for I4.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 32
       },
       "fieldConfig": {
         "defaults": {
@@ -162,23 +442,218 @@
         },
         "overrides": []
       },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom"
-        }
-      },
       "targets": [
         {
           "refId": "A",
-          "expr": "go_goroutines{job=\"conductor\"}",
-          "legendFormat": "goroutines",
+          "expr": "sum(increase(conductor_fenced_writes_rejected_total[5m]))",
+          "legendFormat": "rejected",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
           }
         }
-      ]
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Tool retry pressure",
+      "description": "Are we re-running tools, and which ones?",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 40
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (tool) (rate(conductor_tool_attempts_total[5m]))",
+          "legendFormat": "{{tool}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Unknown outcomes",
+      "description": "How often is a tool outcome genuinely unknown, and how is it resolved?",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 40
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (resolution) (increase(conductor_tool_outcome_unknown_total[15m]))",
+          "legendFormat": "{{resolution}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Duplicate effects",
+      "description": "Did an idempotent tool produce a second effect? Direct evidence for I2 (fake harness only).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 48
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (tool) (increase(conductor_duplicate_effects_total[15m]))",
+          "legendFormat": "{{tool}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "Tool latency (p95)",
+      "description": "How long do tools take, from STARTED to a result?",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 48
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le, tool) (rate(conductor_tool_duration_seconds_bucket[5m])))",
+          "legendFormat": "{{tool}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 15,
+      "type": "timeseries",
+      "title": "Executor cold start (p95)",
+      "description": "What does acquiring an execution environment cost per backend?",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 56
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le, kind) (rate(conductor_executor_acquire_duration_seconds_bucket[15m])))",
+          "legendFormat": "{{kind}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
     }
   ]
 }

@@ -28,10 +28,14 @@ import (
 
 	"github.com/simondxu/conductor/cmd/conductor/internal"
 	"github.com/simondxu/conductor/cmd/conductor/internal/cliutil"
+	"github.com/simondxu/conductor/internal/telemetry"
 	"github.com/simondxu/conductor/proto"
 	"github.com/google/uuid"
 	"github.com/mattn/go-isatty"
 	"github.com/spf13/cobra"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 var (
@@ -139,6 +143,18 @@ func runExec(cmd *cobra.Command, args []string) error {
 		agentConfig = []byte(execAgentConfig)
 	}
 
+	if execServerAddr != "" {
+		// The client's span roots the run's trace (ARCHITECTURE.md §7.1).
+		shutdown, err := telemetry.FromEnv(ctx, "conductor-cli")
+		if err != nil {
+			return err
+		}
+		defer shutdown(context.Background())
+		var span trace.Span
+		ctx, span = otel.Tracer("conductor.cli").Start(ctx, "conductor.run",
+			trace.WithAttributes(attribute.String("conversation_id", execConversationID)))
+		defer span.End()
+	}
 	return execLoop(ctx, execConversationID, execAgentID, agentConfig, execInput)
 }
 

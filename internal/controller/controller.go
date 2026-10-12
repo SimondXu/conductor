@@ -33,6 +33,9 @@ import (
 	"github.com/simondxu/conductor/internal/harness"
 	"github.com/simondxu/conductor/internal/telemetry"
 	"github.com/simondxu/conductor/proto"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/types/known/structpb"
 )
@@ -112,6 +115,8 @@ func New(ctx context.Context, cfg Config) (*Controller, error) {
 func (d *Controller) Exec(ctx context.Context, req *proto.CreateInteractionEvent, handler ExecHandler) (err error) {
 	d.active.Add(1)
 	defer d.active.Done()
+	ctx, span := tracer.Start(ctx, "exec", trace.WithAttributes(attribute.String("conversation_id", req.ConversationId)))
+	defer func() { endSpan(span, err) }()
 	runsActive.WithLabelValues(d.ownerID).Inc()
 	start := time.Now()
 	defer func() {
@@ -142,14 +147,9 @@ func (d *Controller) exec(ctx context.Context, req *proto.CreateInteractionEvent
 	// Adding harness registration support temporarily.
 	l := newLogger(d.eventLog, req.ConversationId, req.AgentId)
 	l.gen = gen
-	events, err := d.eventLog.Events(ctx, req.ConversationId)
+	st, events, err := d.replay(ctx, req.ConversationId)
 	if err != nil {
-		return fmt.Errorf("failed to check resumption state: %w", err)
-	}
-	replayEvents.Add(float64(len(events)))
-	st, err := rebuild(events)
-	if err != nil {
-		return fmt.Errorf("failed to rebuild conversation %q: %w", req.ConversationId, err)
+		return err
 	}
 	if len(req.Inputs) == 0 {
 		slog.InfoContext(ctx, "recovery.rebuild", slog.Int("events", len(events)),
@@ -228,6 +228,21 @@ func (d *Controller) exec(ctx context.Context, req *proto.CreateInteractionEvent
 	return nil
 }
 
+// replay reads the conversation's events and rebuilds its state.
+func (d *Controller) replay(ctx context.Context, conversationID string) (st runState, events []*proto.StepEvent, err error) {
+	ctx, span := tracer.Start(ctx, "replay")
+	defer func() { endSpan(span, err) }()
+	if events, err = d.eventLog.Events(ctx, conversationID); err != nil {
+		return st, nil, fmt.Errorf("failed to check resumption state: %w", err)
+	}
+	replayEvents.Add(float64(len(events)))
+	span.SetAttributes(attribute.Int("events", len(events)))
+	if st, err = rebuild(events); err != nil {
+		return st, nil, fmt.Errorf("failed to rebuild conversation %q: %w", conversationID, err)
+	}
+	return st, events, nil
+}
+
 // own takes the conversation's lease for the duration of one Exec and returns
 // a context that ends when the lease is lost, the generation every ledger
 // write carries, and the release to defer. Without a lease it is a no-op at
@@ -237,7 +252,12 @@ func (d *Controller) own(ctx context.Context, conversationID string) (context.Co
 	if d.lease == nil {
 		return ctx, 0, func() {}, nil
 	}
+	_, span := tracer.Start(ctx, "lease.acquire")
 	held, err := d.lease.Acquire(ctx, conversationID, d.ownerID, d.leaseTTL)
+	if err == nil {
+		span.SetAttributes(attribute.Int64("generation", held.Generation()))
+	}
+	endSpan(span, err)
 	if err != nil {
 		return nil, 0, nil, err
 	}
@@ -373,34 +393,72 @@ func (d *Controller) execOwnedLoop(ctx context.Context, req *proto.CreateInterac
 		if turn == maxOwnedLoopTurns {
 			return fmt.Errorf("harness did not finish within %d turns", maxOwnedLoopTurns)
 		}
-		th.base, th.emitted, th.planned = len(history), nil, nil
-		pending := harness.UnansweredToolCalls(history)
-		if err := d.startCalls(ctx, gen, pending); err != nil {
+		if err := d.runTurn(ctx, gen, harnessID, exec, th, history, turn); err != nil {
 			return err
-		}
-		if err := exec.Queue(ctx, history...); err != nil {
-			return fmt.Errorf("failed to queue history: %w", err)
-		}
-		runErr := exec.Run(ctx, th)
-		// Ledger writes after a failed turn must survive the cancellation that
-		// may have failed it.
-		lctx := context.WithoutCancel(ctx)
-		if err := d.planCalls(lctx, gen, harnessID, th.planned); err != nil {
-			return err
-		}
-		if err := d.settleCalls(lctx, gen, pending, th.emitted, runErr); err != nil {
-			return err
-		}
-		if runErr != nil {
-			return fmt.Errorf("harness execution failed: %w", runErr)
-		}
-		if len(th.emitted) == 0 {
-			return fmt.Errorf("harness turn %d produced no steps", turn)
 		}
 		history = append(history, th.emitted...)
 	}
 	if _, err := l.LogOutputs(ctx, nil, proto.State_STATE_COMPLETED); err != nil {
 		return fmt.Errorf("failed to log completion: %w", err)
+	}
+	return nil
+}
+
+// runTurn runs one owned-loop turn: a tool turn when history ends in
+// unanswered calls, a model turn otherwise. Its span is harness.turn, with a
+// model.call child, or one tool.execute child per call that runs from the
+// call's start to its logged result.
+func (d *Controller) runTurn(ctx context.Context, gen int64, harnessID string, exec harness.Execution, th *turnHandler, history []*proto.Step, turn int) (err error) {
+	th.base, th.emitted, th.planned = len(history), nil, nil
+	pending := harness.UnansweredToolCalls(history)
+	kind := "model"
+	if len(pending) > 0 {
+		kind = "tool"
+	}
+	ctx, span := tracer.Start(ctx, "harness.turn", trace.WithAttributes(
+		attribute.String("kind", kind), attribute.Int("turn", turn), attribute.String("harness", harnessID)))
+	defer func() { endSpan(span, err) }()
+	runCtx := ctx
+	if kind == "model" {
+		var model trace.Span
+		runCtx, model = tracer.Start(ctx, "model.call", trace.WithAttributes(attribute.String("harness", harnessID)))
+		defer func() { endSpan(model, err) }()
+	}
+	th.callSpans = map[string]trace.Span{}
+	for _, c := range pending {
+		_, s := tracer.Start(ctx, "tool.execute", trace.WithAttributes(
+			attribute.String("tool", c.GetFunctionCall().GetName()), attribute.String("call_id", c.GetId()),
+			attribute.String("class", string(d.registry.ToolClass(harnessID, c.GetFunctionCall().GetName())))))
+		th.callSpans[c.GetId()] = s
+	}
+	defer func() {
+		for _, s := range th.callSpans { // calls whose result never came
+			s.SetStatus(codes.Error, "no result")
+			s.End()
+		}
+	}()
+
+	if err := d.startCalls(ctx, gen, pending); err != nil {
+		return err
+	}
+	if err := exec.Queue(runCtx, history...); err != nil {
+		return fmt.Errorf("failed to queue history: %w", err)
+	}
+	runErr := exec.Run(runCtx, th)
+	// Ledger writes after a failed turn must survive the cancellation that
+	// may have failed it.
+	lctx := context.WithoutCancel(ctx)
+	if err := d.planCalls(lctx, gen, harnessID, th.planned); err != nil {
+		return err
+	}
+	if err := d.settleCalls(lctx, gen, pending, th.emitted, runErr); err != nil {
+		return err
+	}
+	if runErr != nil {
+		return fmt.Errorf("harness execution failed: %w", runErr)
+	}
+	if len(th.emitted) == 0 {
+		return fmt.Errorf("harness turn %d produced no steps", turn)
 	}
 	return nil
 }
@@ -486,6 +544,8 @@ type turnHandler struct {
 	base           int // len(history) when the turn started
 	emitted        []*proto.Step
 	planned        []toolledger.PlannedCall
+	// callSpans are the tool.execute spans still open, by call_id.
+	callSpans map[string]trace.Span
 }
 
 func (t *turnHandler) OnMessage(ctx context.Context, execID string, step *proto.Step) error {
@@ -503,6 +563,12 @@ func (t *turnHandler) OnMessage(ctx context.Context, execID string, step *proto.
 	// Only a logged step is part of the history; a result that never reached
 	// the log must not settle its call (I7b).
 	t.emitted = append(t.emitted, step)
+	if r := step.GetToolResult(); r != nil {
+		if s, ok := t.callSpans[r.GetCallId()]; ok {
+			s.End()
+			delete(t.callSpans, r.GetCallId())
+		}
+	}
 	return t.deliver(step)
 }
 

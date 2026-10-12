@@ -40,6 +40,33 @@ effects=$(psql "SELECT count(*) FROM fake_effects e JOIN tool_calls t USING (cal
 settled=$(psql "SELECT count(*) FROM tool_calls WHERE conversation_id = '$conv' AND state = 'SUCCEEDED' AND attempts = 1")
 [[ "$settled" == "2" ]] || fail "tool_calls has $settled settled calls for $conv, want 2"
 
+# M8: one trace spans client -> server -> controller -> harness -> append.
+# Find the client's trace for $conv in Jaeger and require every hop in it.
+# (The compose stack dials a fixed harness, so it has no executor.acquire.)
+trace_ok=""
+for _ in $(seq 1 30); do
+  if curl -sf "http://localhost:${JAEGER_PORT:-16686}/api/traces?service=conductor-cli&limit=50" | python3 -c '
+import json, sys
+conv = sys.argv[1]
+want_services = {"conductor-cli", "conductor-server", "fake-harness"}
+want_ops = {"conductor.run", "exec", "lease.acquire", "replay", "harness.turn", "model.call", "tool.execute", "eventlog.append"}
+for t in json.load(sys.stdin)["data"]:
+    if not any(tag["key"] == "conversation_id" and tag["value"] == conv for s in t["spans"] for tag in s["tags"]):
+        continue
+    services = {p["serviceName"] for p in t["processes"].values()}
+    ops = {s["operationName"] for s in t["spans"]}
+    missing = (want_services - services) | (want_ops - ops)
+    sys.exit(1 if missing else 0)
+sys.exit(1)' "$conv"; then
+    trace_ok=1
+    break
+  fi
+  sleep 1
+done
+[[ -n "$trace_ok" ]] || fail "no complete trace for $conv in Jaeger"
+panels=$(curl -sf "http://localhost:${GRAFANA_PORT:-3000}/api/dashboards/uid/conductor-runtime" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["dashboard"]["panels"]))')
+[[ "$panels" == "15" ]] || fail "Grafana dashboard has '$panels' panels, want 15"
+
 # until <seconds> <sql> <want>: poll psql until it prints want.
 until_eq() {
   local got
@@ -147,4 +174,4 @@ up=$(dc exec -T prometheus wget -qO- 'http://localhost:9090/api/v1/query?query=u
   | sed -n 's/.*"value":\[[^,]*,"\([0-9]\)"\].*/\1/p')
 [[ "$up" == "1" ]] || fail "Prometheus is not scraping the fake harness"
 
-echo "PASS: $conv completed with $steps log rows and $settled settled calls; $crash (harness crash), $killed (owner SIGKILLed) and $rolled (owner SIGTERMed) finished once by another replica with one effect each; I1, I1b, I2, I3', I7b hold; Prometheus sees $runs completed run(s)"
+echo "PASS: $conv completed with $steps log rows and $settled settled calls; $crash (harness crash), $killed (owner SIGKILLed) and $rolled (owner SIGTERMed) finished once by another replica with one effect each; I1, I1b, I2, I3', I7b hold; one trace spans client to append; Prometheus sees $runs completed run(s)"
