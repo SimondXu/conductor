@@ -31,6 +31,8 @@ import (
 // PostgreSQL implementations.
 type sqlEventLog struct {
 	db *sql.DB
+	// projectRuns keeps the runs projection (PostgreSQL only).
+	projectRuns bool
 }
 
 // Append serializes the event to JSON and inserts it into the database. It is
@@ -60,16 +62,23 @@ func (l *sqlEventLog) Append(ctx context.Context, event *proto.StepEvent) (step 
 	if event.EventId != "" {
 		eventID = event.EventId
 	}
+	inserted := true
 	err = tx.QueryRowContext(ctx, `
 		INSERT INTO conversation_log (conversation_id, step, payload, event_id) VALUES ($1, $2, $3, $4)
 		ON CONFLICT (event_id) WHERE event_id IS NOT NULL DO NOTHING
 		RETURNING step`,
 		event.ConversationId, step, string(payload), eventID).Scan(&step)
 	if errors.Is(err, sql.ErrNoRows) {
+		inserted = false
 		err = tx.QueryRowContext(ctx, "SELECT step FROM conversation_log WHERE event_id = $1", eventID).Scan(&step)
 	}
 	if err != nil {
 		return 0, fmt.Errorf("eventlog: insert conversation: %w", err)
+	}
+	if inserted && l.projectRuns {
+		if err := projectRun(ctx, tx, event, step); err != nil {
+			return 0, err
+		}
 	}
 
 	if err := tx.Commit(); err != nil {

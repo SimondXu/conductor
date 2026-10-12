@@ -19,9 +19,11 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/google/uuid"
 	"github.com/simondxu/conductor/internal/config"
 	"github.com/simondxu/conductor/internal/controller"
 	"github.com/simondxu/conductor/internal/controller/eventlog"
+	"github.com/simondxu/conductor/internal/controller/lease"
 	"github.com/simondxu/conductor/internal/controller/toolledger"
 	"github.com/simondxu/conductor/internal/harness"
 	"github.com/simondxu/conductor/internal/harness/antigravity"
@@ -233,12 +235,21 @@ func NewControllerFromConfig(ctx context.Context, cfg *Config) (*controller.Cont
 		return nil, fmt.Errorf("set default harness %q: %w", defaultHarnessID, err)
 	}
 
-	// The tool ledger lives next to the event log; SQLite has none.
+	// The tool ledger and the conversation leases live next to the event
+	// log; SQLite has neither, and ownership is process-local there.
 	var ledger toolledger.Ledger
+	var leases lease.Lease
+	var ownerID string
 	if cfg.EventLog.PostgresConfig.DSN != "" {
-		if ledger, err = toolledger.OpenPostgres(os.ExpandEnv(cfg.EventLog.PostgresConfig.DSN)); err != nil {
+		dsn := os.ExpandEnv(cfg.EventLog.PostgresConfig.DSN)
+		if ledger, err = toolledger.OpenPostgres(dsn); err != nil {
 			return nil, err
 		}
+		if leases, err = lease.OpenPostgres(dsn); err != nil {
+			return nil, err
+		}
+		host, _ := os.Hostname()
+		ownerID = fmt.Sprintf("%s/%d/%s", host, os.Getpid(), uuid.NewString()[:8])
 	}
 
 	return controller.New(ctx, controller.Config{
@@ -253,7 +264,10 @@ func NewControllerFromConfig(ctx context.Context, cfg *Config) (*controller.Cont
 			}
 			return eventlog.OpenSQLiteEventLog(cfg.EventLog.SQLiteConfig.Filename)
 		},
-		Ledger: ledger,
+		Ledger:   ledger,
+		Lease:    leases,
+		OwnerID:  ownerID,
+		LeaseTTL: cfg.EventLog.PostgresConfig.LeaseTTL,
 	})
 }
 

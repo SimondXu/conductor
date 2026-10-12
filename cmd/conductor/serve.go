@@ -25,6 +25,7 @@ import (
 	"syscall"
 
 	"github.com/simondxu/conductor/cmd/conductor/internal/cliutil"
+	"github.com/simondxu/conductor/internal/controller"
 	"github.com/simondxu/conductor/internal/server"
 	"github.com/simondxu/conductor/internal/telemetry"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -111,6 +112,27 @@ func runServe(cmd *cobra.Command, args []string) error {
 
 	// Create server
 	srv := server.New(c)
+
+	// The reconciler finishes runs nobody is driving (ARCHITECTURE.md §6.1).
+	// It needs PostgreSQL; on SQLite ownership is process-local and there is
+	// nothing to recover from.
+	recCtx, stopReconciler := context.WithCancel(ctx)
+	recDone := make(chan struct{})
+	if cfg.EventLog.PostgresConfig.DSN != "" {
+		go func() {
+			defer close(recDone)
+			if err := c.RunReconciler(recCtx, controller.ReconcilerConfig{}); err != nil {
+				slog.ErrorContext(ctx, "reconciler exited", slog.Any("error", err))
+			}
+		}()
+	} else {
+		close(recDone)
+		slog.WarnContext(ctx, "SQLite event log: ownership is process-local and no reconciler runs; use PostgreSQL for recovery")
+	}
+	defer func() {
+		stopReconciler()
+		<-recDone
+	}()
 
 	// Setup signal handling for graceful shutdown
 	sigChan := make(chan os.Signal, 1)

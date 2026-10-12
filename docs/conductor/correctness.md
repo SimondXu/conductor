@@ -258,8 +258,12 @@ shuffled-batch) and `TestPostRecoveryStateEqualsRebuilt`.
 > `runs` is derived entirely from `conversation_log`. Dropping and rebuilding it
 > yields identical content.
 
-**Falsified by** `TestRunsProjectionRebuild`: snapshot `runs`, `TRUNCATE`,
-replay every conversation through the projector, diff.
+**Falsified by** `TestRunsProjectionMatchesLog`
+(`internal/controller/eventlog/runs_test.go`): the row the append path wrote
+is diffed against the row derived from `conversation_log` alone by the
+migration's backfill query, including across a retried append. The
+reconciler's bookkeeping columns (`recovery_attempts`, `next_attempt_at`)
+are not part of the projection.
 
 Recovery uses `runs` **only to find candidates**. Truth is always re-derived by
 `rebuild(events)`. A stale or wrong projection must degrade to "slower

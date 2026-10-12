@@ -42,7 +42,7 @@ const errAbandoned = "outcome unknown and the tool cannot be safely re-run"
 // When the run fails, every unknown call is abandoned and failed is one error
 // result per unanswered call, to be logged with the FAILED state so the
 // history stays answerable.
-func (d *Controller) recoverCalls(ctx context.Context, conversationID, harnessID string, history []*proto.Step) (failed []*proto.Step, err error) {
+func (d *Controller) recoverCalls(ctx context.Context, gen int64, conversationID, harnessID string, history []*proto.Step) (failed []*proto.Step, err error) {
 	rows, err := d.ledger.Calls(ctx, conversationID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read the tool ledger: %w", err)
@@ -90,7 +90,7 @@ func (d *Controller) recoverCalls(ctx context.Context, conversationID, harnessID
 			fail = true // abandoned by an earlier recovery that died before logging it
 			continue
 		case toolledger.Started:
-			if err := d.ledger.MarkUnknown(ctx, ownerGeneration, row.CallID, "owner crashed in flight"); err != nil {
+			if err := d.ledger.MarkUnknown(ctx, gen, row.CallID, "owner crashed in flight"); err != nil {
 				return nil, fmt.Errorf("failed to mark tool call %s unknown: %w", row.CallID, err)
 			}
 		case toolledger.OutcomeUnknown:
@@ -106,10 +106,10 @@ func (d *Controller) recoverCalls(ctx context.Context, conversationID, harnessID
 			fail = true
 		}
 	}
-	if err := d.settleCalls(ctx, answered, history, nil); err != nil {
+	if err := d.settleCalls(ctx, gen, answered, history, nil); err != nil {
 		return nil, err
 	}
-	if err := d.planCalls(ctx, harnessID, unplanned); err != nil {
+	if err := d.planCalls(ctx, gen, harnessID, unplanned); err != nil {
 		return nil, err
 	}
 	if !fail {
@@ -120,7 +120,7 @@ func (d *Controller) recoverCalls(ctx context.Context, conversationID, harnessID
 	}
 
 	for _, row := range unknown {
-		if err := d.ledger.Settle(ctx, ownerGeneration, row.CallID, toolledger.Outcome{State: toolledger.Abandoned, Error: errAbandoned}); err != nil {
+		if err := d.ledger.Settle(ctx, gen, row.CallID, toolledger.Outcome{State: toolledger.Abandoned, Error: errAbandoned}); err != nil {
 			return nil, fmt.Errorf("failed to abandon tool call %s: %w", row.CallID, err)
 		}
 	}

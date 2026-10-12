@@ -18,6 +18,7 @@
 package server
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -31,6 +32,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/simondxu/conductor/internal/controller"
+	"github.com/simondxu/conductor/internal/controller/lease"
 	"github.com/simondxu/conductor/proto"
 )
 
@@ -68,7 +70,12 @@ func (s *Server) CreateInteraction(req *proto.CreateInteractionEvent, stream grp
 	outputHandler := controller.ExecHandler(func(resp *proto.CreateInteractionResponse) error {
 		return stream.Send(resp)
 	})
-	return s.controller.Exec(ctx, req, outputHandler)
+	err := s.controller.Exec(ctx, req, outputHandler)
+	if errors.Is(err, lease.ErrHeld) {
+		// Another replica or the reconciler is driving it (PRD.md §6.1).
+		return status.Errorf(codes.FailedPrecondition, "conversation %q is already in flight: %v", req.ConversationId, err)
+	}
+	return err
 }
 
 // Serve starts the gRPC server on the specified address.

@@ -113,6 +113,20 @@ func (p *Postgres) transition(ctx context.Context, callID string, target State, 
 	return fmt.Errorf("%w: %s -> %s for %s", ErrTransition, current, target, callID)
 }
 
+// DeadlineExceeded is the error of a call abandoned at its reconcile_deadline.
+const DeadlineExceeded = "reconcile_deadline_exceeded"
+
+func (p *Postgres) ExpireDeadlines(ctx context.Context) (int, error) {
+	res, err := p.db.ExecContext(ctx, `
+		UPDATE tool_calls SET state = 'ABANDONED', error = $1, settled_at = now()
+		 WHERE state = 'OUTCOME_UNKNOWN' AND reconcile_deadline < now()`, DeadlineExceeded)
+	if err != nil {
+		return 0, fmt.Errorf("toolledger: expire deadlines: %w", err)
+	}
+	n, err := res.RowsAffected()
+	return int(n), err
+}
+
 func (p *Postgres) Calls(ctx context.Context, conversationID string) ([]ToolCall, error) {
 	rows, err := p.db.QueryContext(ctx, `
 		SELECT call_id, conversation_id, step, tool_name, args_hash, args, class,
