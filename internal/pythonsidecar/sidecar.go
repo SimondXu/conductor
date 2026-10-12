@@ -31,7 +31,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/google/ax/internal/config"
+	"github.com/simondxu/conductor/internal/config"
 )
 
 // Config holds the configuration parameters for the sidecar lifecycle.
@@ -73,7 +73,7 @@ func New(cfg Config) *Sidecar {
 }
 
 func resolvePIDFile() (string, error) {
-	axDir, err := config.AXAssetsDir()
+	axDir, err := config.AssetsDir()
 	if err != nil {
 		return "", fmt.Errorf("failed to resolve AX assets dir: %w", err)
 	}

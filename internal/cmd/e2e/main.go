@@ -34,11 +34,11 @@ import (
 	"os"
 	"time"
 
-	"github.com/google/ax/internal/controller"
-	"github.com/google/ax/internal/controller/eventlog"
-	"github.com/google/ax/internal/controller/eventlog/eventlogtest"
-	"github.com/google/ax/internal/harness/antigravity"
-	"github.com/google/ax/proto"
+	"github.com/simondxu/conductor/internal/controller"
+	"github.com/simondxu/conductor/internal/controller/eventlog"
+	"github.com/simondxu/conductor/internal/controller/eventlog/eventlogtest"
+	"github.com/simondxu/conductor/internal/harness/antigravity"
+	"github.com/simondxu/conductor/proto"
 )
 
 func main() {

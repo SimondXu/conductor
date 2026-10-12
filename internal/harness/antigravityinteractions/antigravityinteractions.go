@@ -59,9 +59,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/ax/internal/config"
-	"github.com/google/ax/internal/harness"
-	"github.com/google/ax/proto"
+	"github.com/simondxu/conductor/internal/config"
+	"github.com/simondxu/conductor/internal/harness"
+	"github.com/simondxu/conductor/proto"
 	"github.com/google/uuid"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
@@ -76,7 +76,7 @@ const (
 	cloudPlatformScope = "https://www.googleapis.com/auth/cloud-platform"
 
 	// Cloud project and location are read from these standard environment
-	// variables (see https://github.com/google/ax#authentication).
+	// variables (see https://github.com/simondxu/conductor#authentication).
 	envCloudProject  = "GOOGLE_CLOUD_PROJECT"
 	envCloudLocation = "GOOGLE_CLOUD_LOCATION"
 	// defaultLocation is used when GOOGLE_CLOUD_LOCATION is unset.
@@ -120,7 +120,7 @@ type AntigravityInteractionsConfig struct {
 	// authoritative base for built-in env tools: run_command executes there (and
 	// resolves a relative Cwd against it). This makes tool execution independent
 	// of the process's ambient cwd. Empty means "use the process cwd" (the
-	// previous behavior). Defaults from AX_HARNESS_WORKDIR.
+	// previous behavior). Defaults from CONDUCTOR_HARNESS_WORKDIR.
 	WorkDir string
 
 	// SystemInstruction, if set, is sent as the interaction's system_instruction
@@ -151,7 +151,7 @@ func (c *AntigravityInteractionsConfig) withDefaults() {
 		c.MaxTurns = 100
 	}
 	if c.WorkDir == "" {
-		c.WorkDir = os.Getenv("AX_HARNESS_WORKDIR")
+		c.WorkDir = os.Getenv("CONDUCTOR_HARNESS_WORKDIR")
 	}
 }
 
@@ -170,13 +170,13 @@ func cloudLocation() string {
 }
 
 // DefaultStateDir returns the default resume-cursor directory,
-// <AXAssetsDir>/antigravityinteractions/cursors, used when a caller does not set
-// StateDir explicitly. Locally that is ~/.ax/...; on a substrate actor
-// AX_DURABLE_DIR points AXAssetsDir at a durable volume (e.g. /durable/.ax), kept
+// <AssetsDir>/antigravityinteractions/cursors, used when a caller does not set
+// StateDir explicitly. Locally that is ~/.conductor/...; on a substrate actor
+// CONDUCTOR_DURABLE_DIR points AssetsDir at a durable volume (e.g. /durable/.conductor), kept
 // outside the agent's working directory so the agent does not see or modify it.
 // New still requires a non-empty StateDir; callers apply this default.
 func DefaultStateDir() (string, error) {
-	axDir, err := config.AXAssetsDir()
+	axDir, err := config.AssetsDir()
 	if err != nil {
 		return "", err
 	}
@@ -378,7 +378,7 @@ func (e *antigravityInteractionsExecution) Run(ctx context.Context, handler harn
 	// Set the working directory for this execution. Substrate resets the
 	// process cwd to the OCI spec's root directory, "/" after gVisor
 	// restore. We need to explicitly set it for each execution.
-	if workDir := os.Getenv("AX_HARNESS_WORKDIR"); workDir != "" {
+	if workDir := os.Getenv("CONDUCTOR_HARNESS_WORKDIR"); workDir != "" {
 		if err := os.Chdir(workDir); err != nil {
 			return fmt.Errorf("set working directory %q: %w", workDir, err)
 		}

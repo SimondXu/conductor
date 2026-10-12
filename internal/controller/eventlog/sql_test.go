@@ -20,7 +20,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/google/ax/proto"
+	schema "github.com/simondxu/conductor/db"
+	"github.com/simondxu/conductor/proto"
 )
 
 // testEventLog runs the EventLog contract against a backend. newLog returns a
@@ -129,6 +130,9 @@ func TestPostgresEventLog(t *testing.T) {
 	dsn := os.Getenv("PG_TEST_DSN")
 	if dsn == "" {
 		t.Skip("PG_TEST_DSN not set; skipping Postgres event log tests")
+	}
+	if _, err := schema.Up(dsn); err != nil {
+		t.Fatalf("migrate up: %v", err)
 	}
 	testEventLog(t, func(t *testing.T) EventLog {
 		t.Helper()

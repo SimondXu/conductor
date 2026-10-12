@@ -20,11 +20,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/google/ax/internal/controller/eventlog"
-	"github.com/google/ax/internal/controller/eventlog/eventlogtest"
-	"github.com/google/ax/internal/harness"
-	"github.com/google/ax/internal/harness/harnesstest"
-	"github.com/google/ax/proto"
+	"github.com/simondxu/conductor/internal/controller/eventlog"
+	"github.com/simondxu/conductor/internal/controller/eventlog/eventlogtest"
+	"github.com/simondxu/conductor/internal/harness"
+	"github.com/simondxu/conductor/internal/harness/fake"
+	"github.com/simondxu/conductor/internal/harness/harnesstest"
+	"github.com/simondxu/conductor/proto"
 )
 
 type fakeHarness struct{}
@@ -621,11 +622,117 @@ func TestExec_NewConversationLogsCanonicalDefault(t *testing.T) {
 	}, ExecHandler(func(*proto.CreateInteractionResponse) error { return nil })); err != nil {
 		t.Fatalf("exec: %v", err)
 	}
-	_, stored, err := newLogger(log, cid, "").ResumptionState(ctx)
+	_, stored, _, err := newLogger(log, cid, "").ResumptionState(ctx)
 	if err != nil {
 		t.Fatalf("ResumptionState: %v", err)
 	}
 	if stored != "harness-a" {
 		t.Errorf("logged harness id = %q, want canonical %q (not empty)", stored, "harness-a")
+	}
+}
+
+func newOwnedLoopController(t *testing.T, log *eventlogtest.MemoryEventLog, effects *fake.MemoryEffects) *Controller {
+	t.Helper()
+	reg := NewRegistry()
+	if err := reg.Register("fake", fake.New(effects), RecoveryFull); err != nil {
+		t.Fatal(err)
+	}
+	c, err := New(context.Background(), Config{
+		Registry:        reg,
+		EventLogBuilder: func() (eventlog.EventLog, error) { return log, nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { c.Close() })
+	return c
+}
+
+func TestOwnedLoop_RunsScriptToCompletion(t *testing.T) {
+	log := &eventlogtest.MemoryEventLog{}
+	effects := &fake.MemoryEffects{}
+	c := newOwnedLoopController(t, log, effects)
+
+	var delivered int
+	err := c.Exec(context.Background(), &proto.CreateInteractionEvent{
+		ConversationId: "owned",
+		AgentId:        "fake",
+		Inputs:         []*proto.Step{harnesstest.UserStep("go")},
+	}, func(resp *proto.CreateInteractionResponse) error {
+		delivered += len(resp.Outputs)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	events, _ := log.Events(context.Background(), "owned")
+	// inputs, thought, call, result, call, result, content, COMPLETED
+	if len(events) != 8 {
+		t.Fatalf("events = %d, want 8", len(events))
+	}
+	for i, ev := range events[:7] {
+		if ev.State != proto.State_STATE_PENDING {
+			t.Errorf("event %d state = %v, want PENDING", i, ev.State)
+		}
+	}
+	if last := events[7]; last.State != proto.State_STATE_COMPLETED || len(last.Steps) != 0 {
+		t.Errorf("last event = %v, want COMPLETED with no steps", last)
+	}
+	if delivered != 6 {
+		t.Errorf("delivered %d steps, want 6", delivered)
+	}
+	if len(effects.Effects) != 2 {
+		t.Errorf("effects = %d, want 2", len(effects.Effects))
+	}
+}
+
+func TestOwnedLoop_RefusesUnansweredToolCall(t *testing.T) {
+	log := &eventlogtest.MemoryEventLog{}
+	effects := &fake.MemoryEffects{}
+	ctx := context.Background()
+	call := &proto.Step{Type: &proto.Step_ToolCall{ToolCall: &proto.ToolCallStep{
+		Id:   "c1",
+		Type: &proto.ToolCallStep_FunctionCall{FunctionCall: &proto.FunctionCallStep{Name: "charge_card"}},
+	}}}
+	if _, err := log.Append(ctx, &proto.StepEvent{
+		ConversationId: "crashed", AgentId: "fake", State: proto.State_STATE_PENDING,
+		Steps: []*proto.Step{harnesstest.UserStep("go"), call},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	c := newOwnedLoopController(t, log, effects)
+
+	err := c.Exec(ctx, &proto.CreateInteractionEvent{ConversationId: "crashed"}, nil)
+	if err == nil || !strings.Contains(err.Error(), "unanswered tool call") {
+		t.Fatalf("err = %v, want unanswered tool call refusal", err)
+	}
+	if len(effects.Effects) != 0 {
+		t.Errorf("tool re-executed without the ledger: %+v", effects.Effects)
+	}
+}
+
+func TestOwnedLoop_ResumesAfterFailedModelTurn(t *testing.T) {
+	log := &eventlogtest.MemoryEventLog{}
+	c := newOwnedLoopController(t, log, &fake.MemoryEffects{})
+	ctx := context.Background()
+	cfg := []byte(`{"turns":[{"content":"hello","fail_once":true}]}`)
+
+	err := c.Exec(ctx, &proto.CreateInteractionEvent{
+		ConversationId: "retry", AgentId: "fake", AgentConfig: cfg,
+		Inputs: []*proto.Step{harnesstest.UserStep("go")},
+	}, nil)
+	if err == nil {
+		t.Fatal("first Exec: want the fail_once error")
+	}
+	if err := c.Exec(ctx, &proto.CreateInteractionEvent{ConversationId: "retry", AgentConfig: cfg}, nil); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	state, _, steps, err := newLogger(log, "retry", "").ResumptionState(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state != proto.State_STATE_COMPLETED || len(steps) != 2 {
+		t.Fatalf("state = %v, steps = %d; want COMPLETED with user + assistant", state, len(steps))
 	}
 }

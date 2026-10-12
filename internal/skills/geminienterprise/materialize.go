@@ -32,8 +32,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/google/ax/internal/config"
-	"github.com/google/ax/internal/skills"
+	"github.com/simondxu/conductor/internal/config"
+	"github.com/simondxu/conductor/internal/skills"
 )
 
 // Environment fallbacks for project/location (the registry target_dir is a

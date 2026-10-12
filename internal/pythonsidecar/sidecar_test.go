@@ -26,7 +26,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/ax/internal/pythonsidecar"
+	"github.com/simondxu/conductor/internal/pythonsidecar"
 )
 
 func getFreePort(t *testing.T) int {
@@ -54,7 +54,7 @@ func TestSidecar_ConfigValidation(t *testing.T) {
 
 func TestSidecar_ModuleExecution(t *testing.T) {
 	tmpDir := t.TempDir()
-	t.Setenv("AX_DURABLE_DIR", tmpDir)
+	t.Setenv("CONDUCTOR_DURABLE_DIR", tmpDir)
 	modulePath := filepath.Join(tmpDir, "test_module.py")
 	moduleContent := `
 import sys
@@ -97,7 +97,7 @@ sys.exit(0)
 }
 
 func TestSidecar_ModuleServerWithTCPReady(t *testing.T) {
-	t.Setenv("AX_DURABLE_DIR", t.TempDir())
+	t.Setenv("CONDUCTOR_DURABLE_DIR", t.TempDir())
 	port := getFreePort(t)
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 
@@ -129,7 +129,7 @@ func TestSidecar_ModuleServerWithTCPReady(t *testing.T) {
 
 func TestSidecar_ReadinessFailureOnPrematureExit(t *testing.T) {
 	tmpDir := t.TempDir()
-	t.Setenv("AX_DURABLE_DIR", tmpDir)
+	t.Setenv("CONDUCTOR_DURABLE_DIR", tmpDir)
 	modulePath := filepath.Join(tmpDir, "crash.py")
 	if err := os.WriteFile(modulePath, []byte("import sys; sys.exit(1)\n"), 0644); err != nil {
 		t.Fatalf("failed to write script: %v", err)
@@ -161,7 +161,7 @@ func TestSidecar_ReadinessFailureOnPrematureExit(t *testing.T) {
 }
 
 func TestSidecar_EndpointAlreadyInUse(t *testing.T) {
-	t.Setenv("AX_DURABLE_DIR", t.TempDir())
+	t.Setenv("CONDUCTOR_DURABLE_DIR", t.TempDir())
 	// Start a dummy TCP listener on a free port
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -190,8 +190,8 @@ func TestSidecar_EndpointAlreadyInUse(t *testing.T) {
 
 func TestSidecar_PIDFileHandling(t *testing.T) {
 	durableDir := t.TempDir()
-	t.Setenv("AX_DURABLE_DIR", durableDir)
-	pidFile := filepath.Join(durableDir, ".ax", "sidecar.pid")
+	t.Setenv("CONDUCTOR_DURABLE_DIR", durableDir)
+	pidFile := filepath.Join(durableDir, ".conductor", "sidecar.pid")
 
 	port := getFreePort(t)
 	addr := fmt.Sprintf("127.0.0.1:%d", port)

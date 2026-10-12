@@ -27,6 +27,16 @@ jobs:
 
   build:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 2s --health-retries 30
+    env:
+      PG_TEST_DSN: postgres://postgres:test@localhost:5432/postgres?sslmode=disable
     steps:
     - uses: actions/checkout@v4
 

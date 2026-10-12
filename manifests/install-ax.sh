@@ -105,10 +105,10 @@ detect_container_engine() {
   fi
 }
 
-# _build_and_push_ax builds one target of cmd/ax/Dockerfile into ${repo}:<git-sha>,
+# _build_and_push_ax builds one target of cmd/conductor/Dockerfile into ${repo}:<git-sha>,
 # pushes it, and echoes the digest-pinned reference on stdout. Args:
-#   $1 repo   - fully-qualified image repo (e.g. gcr.io/proj/ax)
-#   $2 target - Dockerfile target stage (ax | antigravity)
+#   $1 repo   - fully-qualified image repo (e.g. gcr.io/proj/conductor)
+#   $2 target - Dockerfile target stage (conductor | antigravity)
 # Requires AX_IMAGE_REPO and a container engine.
 _build_and_push_ax() {
   local repo="$1" target="$2"
@@ -131,7 +131,7 @@ _build_and_push_ax() {
   "${CONTAINER_ENGINE}" build \
     --platform linux/amd64 \
     --target "${target}" \
-    -f cmd/ax/Dockerfile \
+    -f cmd/conductor/Dockerfile \
     -t "${image}" \
     . 2>&1 \
     | awk '{ sub(/^\[[0-9]+\/[0-9]+\] /, ""); print; fflush() }' >&2
@@ -162,7 +162,7 @@ _build_and_push_ax() {
 # build_ax_image builds and pushes the Go-only ax image used by the ax-server and the
 # Go interactions harness.
 build_ax_image() {
-  _build_and_push_ax "${AX_IMAGE_REPO}/ax" ax
+  _build_and_push_ax "${AX_IMAGE_REPO}/conductor" conductor
 }
 
 # build_ax_antigravity_image builds and pushes the antigravity image used by the
@@ -234,20 +234,20 @@ deploy_ax_server() {
     # Reuse the existing bundled-Postgres password if present, else POSTGRES_PASSWORD,
     # else generate one.
     local existing_pw
-    existing_pw="$(run_kubectl -n ax get secret ax-eventlog-postgres -o go-template='{{.data.password | base64decode}}' 2>/dev/null || true)"
+    existing_pw="$(run_kubectl -n conductor get secret ax-eventlog-postgres -o go-template='{{.data.password | base64decode}}' 2>/dev/null || true)"
     if [[ -n "${existing_pw}" ]]; then
       pg_password="${existing_pw}"
     else
       pg_password="${POSTGRES_PASSWORD:-$(openssl rand -hex 16)}"
     fi
-    pg_dsn="postgres://axuser:${pg_password}@ax-eventlog-postgres.ax.svc:5432/axeventlog?sslmode=disable"
+    pg_dsn="postgres://axuser:${pg_password}@ax-eventlog-postgres.conductor.svc:5432/axeventlog?sslmode=disable"
   else
     pg_dsn="${AX_EVENTLOG_DSN}"
     echo "Using existing Postgres via AX_EVENTLOG_DSN." >&2
   fi
 
   # Base64 of the single-source config file (manifests/ax.yaml), injected into
-  # each ActorTemplate's AX_CONFIG_CONTENT env so substrate actors read their config
+  # each ActorTemplate's CONDUCTOR_CONFIG_CONTENT env so substrate actors read their config
   # without a mounted ConfigMap.
   local ax_config_content
   ax_config_content="$(base64 < manifests/ax.yaml | tr -d '\n')"
@@ -260,7 +260,7 @@ deploy_ax_server() {
     -e "s|\${AX_ANTIGRAVITY_IMAGE}|${ax_antigravity_image}|g"
     -e "s|\${ATEOM_IMAGE}|${ateom_image}|g"
     -e "s|\${GOOGLE_CLOUD_PROJECT}|${GOOGLE_CLOUD_PROJECT:-}|g"
-    -e "s|\${AX_CONFIG_CONTENT}|${ax_config_content}|g"
+    -e "s|\${CONDUCTOR_CONFIG_CONTENT}|${ax_config_content}|g"
   )
 
   # Render and apply the core manifest (namespace, harnesses, ax-server).
@@ -273,9 +273,9 @@ deploy_ax_server() {
   fi
 
   # Create/update the controller ConfigMap from the single-source config file
-  # (manifests/ax.yaml) -- the same file that seeds the actors' AX_CONFIG_CONTENT.
+  # (manifests/ax.yaml) -- the same file that seeds the actors' CONDUCTOR_CONFIG_CONTENT.
   # ax-server mounts it at /etc/ax/ax.yaml.
-  run_kubectl -n ax create configmap ax-server-config \
+  run_kubectl -n conductor create configmap ax-server-config \
     --from-file=ax.yaml=manifests/ax.yaml \
     --dry-run=client -o yaml | run_kubectl apply -f -
 
@@ -285,7 +285,7 @@ deploy_ax_server() {
   if [[ "${DEPLOY_POSTGRES}" == "true" ]]; then
     secret_args+=(--from-literal=password="${pg_password}")
   fi
-  run_kubectl -n ax create secret generic ax-eventlog-postgres "${secret_args[@]}" \
+  run_kubectl -n conductor create secret generic ax-eventlog-postgres "${secret_args[@]}" \
     --dry-run=client -o yaml | run_kubectl apply -f -
 
   # With --deploy-postgres, create the bundled Postgres and wait for it to be
@@ -294,27 +294,27 @@ deploy_ax_server() {
     run_kubectl apply -f manifests/ax-postgres.yaml
     log_step "wait for statefulset/ax-eventlog-postgres to be ready"
     wait_with_spinner "waiting for postgres (timeout ${AX_WAIT_TIMEOUT:-5m})" \
-      run_kubectl -n ax rollout status statefulset/ax-eventlog-postgres \
+      run_kubectl -n conductor rollout status statefulset/ax-eventlog-postgres \
       --timeout="${AX_WAIT_TIMEOUT:-5m}"
   fi
 
   # Wait for the antigravity ActorTemplate's golden snapshot to be ready.
-  log_step "wait for actortemplate/ax-harness-antigravity-template to be Ready"
+  log_step "wait for actortemplate/conductor-harness-antigravity-template to be Ready"
   wait_with_spinner "waiting for antigravity golden snapshot (timeout ${AX_WAIT_TIMEOUT:-5m})" \
-    run_kubectl wait --for=condition=Ready actortemplate/ax-harness-antigravity-template \
-    -n ax --timeout="${AX_WAIT_TIMEOUT:-5m}"
+    run_kubectl wait --for=condition=Ready actortemplate/conductor-harness-antigravity-template \
+    -n conductor --timeout="${AX_WAIT_TIMEOUT:-5m}"
 
   # Wait for the interactions ActorTemplate's golden snapshot to be ready.
-  log_step "wait for actortemplate/ax-harness-interactions-template to be Ready"
+  log_step "wait for actortemplate/conductor-harness-interactions-template to be Ready"
   wait_with_spinner "waiting for interactions golden snapshot (timeout ${AX_WAIT_TIMEOUT:-5m})" \
-    run_kubectl wait --for=condition=Ready actortemplate/ax-harness-interactions-template \
-    -n ax --timeout="${AX_WAIT_TIMEOUT:-5m}"
+    run_kubectl wait --for=condition=Ready actortemplate/conductor-harness-interactions-template \
+    -n conductor --timeout="${AX_WAIT_TIMEOUT:-5m}"
 
   echo ""
   echo "Forward the AX server by running the following command (optional)"
-  echo "kubectl port-forward -n ax rs/ax-server 8494:8494"
+  echo "kubectl port-forward -n conductor rs/ax-server 8494:8494"
   echo ""
-  echo "Then, run: ax --server localhost:8494 [--agent antigravity|antigravity-interactions]"
+  echo "Then, run: conductor run --server localhost:8494 [--agent antigravity|antigravity-interactions]"
 }
 
 # delete_ax_server removes the AX server and harness resources but preserves the
@@ -324,12 +324,12 @@ deploy_ax_server() {
 delete_ax_server() {
   log_step "delete_ax_server"
 
-  run_kubectl -n ax delete --ignore-not-found \
+  run_kubectl -n conductor delete --ignore-not-found \
     replicaset/ax-server \
     configmap/ax-server-config \
-    actortemplate/ax-harness-antigravity-template \
-    actortemplate/ax-harness-interactions-template \
-    workerpool/ax-harness-workerpool
+    actortemplate/conductor-harness-antigravity-template \
+    actortemplate/conductor-harness-interactions-template \
+    workerpool/conductor-harness-workerpool
 }
 
 if [ "$#" -eq 0 ]; then

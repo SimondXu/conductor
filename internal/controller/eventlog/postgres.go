@@ -21,11 +21,13 @@ import (
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
+
+	schema "github.com/simondxu/conductor/db"
 )
 
 // OpenPostgresEventLog connects to the PostgreSQL database described by dsn and
-// initializes the event log schema. Caller is responsible to ensure it is safe
-// for concurrent use.
+// checks that its schema is at db.SchemaVersion. Caller is responsible to ensure
+// it is safe for concurrent use.
 func OpenPostgresEventLog(dsn string) (EventLog, error) {
 	db, err := sql.Open("pgx", dsn)
 	if err != nil {
@@ -40,18 +42,19 @@ func OpenPostgresEventLog(dsn string) (EventLog, error) {
 		return nil, fmt.Errorf("postgres_eventlog: ping: %w", err)
 	}
 
-	// Create tables if they don't exist.
-	if _, err := db.ExecContext(ctx, `
-		CREATE TABLE IF NOT EXISTS conversation_log (
-			conversation_id TEXT NOT NULL,
-			step INTEGER NOT NULL,
-			payload TEXT NOT NULL,
-			PRIMARY KEY (conversation_id, step)
-		)`); err != nil {
+	// The schema belongs to `conductor migrate`; refuse to run against any
+	// other version rather than guess.
+	var version int64
+	var dirty bool
+	if err := db.QueryRowContext(ctx, "SELECT version, dirty FROM schema_migrations").Scan(&version, &dirty); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("postgres_eventlog: create conversation_log table: %w", err)
+		return nil, fmt.Errorf("postgres_eventlog: reading schema version (run `conductor migrate up`): %w", err)
 	}
-
+	if dirty || version != schema.SchemaVersion {
+		db.Close()
+		return nil, fmt.Errorf("postgres_eventlog: schema version %d (dirty: %t), this binary needs %d: run `conductor migrate up`",
+			version, dirty, schema.SchemaVersion)
+	}
 
 	return &sqlEventLog{db: db}, nil
 }

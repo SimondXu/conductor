@@ -21,8 +21,9 @@ import (
 	"net"
 	"testing"
 
-	"github.com/google/ax/internal/harness/harnesstest"
-	"github.com/google/ax/proto"
+	"github.com/simondxu/conductor/internal/harness/harnesstest"
+	"github.com/simondxu/conductor/internal/harness/remote"
+	"github.com/simondxu/conductor/proto"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/test/bufconn"
@@ -34,7 +35,7 @@ func startTestServer(t *testing.T, h *AntigravityInteractionsHarness) proto.Harn
 	t.Helper()
 	lis := bufconn.Listen(1024 * 1024)
 	s := grpc.NewServer()
-	proto.RegisterHarnessServiceServer(s, &server{h: h})
+	proto.RegisterHarnessServiceServer(s, remote.NewServer(h))
 	go func() { _ = s.Serve(lis) }()
 	t.Cleanup(s.Stop)
 

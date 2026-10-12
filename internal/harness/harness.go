@@ -19,7 +19,7 @@ package harness
 import (
 	"context"
 
-	"github.com/google/ax/proto"
+	"github.com/simondxu/conductor/proto"
 )
 
 // Handler defines the streaming event hook callbacks for an execution turn.

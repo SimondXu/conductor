@@ -21,8 +21,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/google/ax/internal/harness/harnesstest"
-	"github.com/google/ax/proto"
+	"github.com/simondxu/conductor/internal/harness/harnesstest"
+	"github.com/simondxu/conductor/proto"
 )
 
 var antigravityAgentConfig = []byte(`{"system_instructions":"be terse"}`)
@@ -108,7 +108,7 @@ func TestNew_AutoStartFalse_NilSidecar(t *testing.T) {
 	}
 }
 
-// TestDefaultStateDir returns ~/.ax/antigravity/conversations under the user's
+// TestDefaultStateDir returns ~/.conductor/antigravity/conversations under the user's
 // home directory.
 func TestDefaultStateDir(t *testing.T) {
 	home := t.TempDir()
@@ -118,7 +118,7 @@ func TestDefaultStateDir(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DefaultStateDir: %v", err)
 	}
-	if want := filepath.Join(home, ".ax", "antigravity", "conversations"); got != want {
+	if want := filepath.Join(home, ".conductor", "antigravity", "conversations"); got != want {
 		t.Errorf("DefaultStateDir() = %q, want %q", got, want)
 	}
 }

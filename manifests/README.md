@@ -82,7 +82,7 @@ export AX_EVENTLOG_DSN="postgres://user:pass@host:5432/db?sslmode=require"
 The bundled Postgres uses an auto-generated password. To get its DSN:
 
 ```bash
-kubectl get secret ax-eventlog-postgres -n ax -o go-template='{{.data.dsn | base64decode}}'
+kubectl get secret ax-eventlog-postgres -n conductor -o go-template='{{.data.dsn | base64decode}}'
 ```
 
 #### Vertex AI access for the Antigravity Interactions harness
@@ -91,11 +91,11 @@ kubectl get secret ax-eventlog-postgres -n ax -o go-template='{{.data.dsn | base
 > You may skip this if you only use the default harness.
 
 The Antigravity **Interactions** harness (`ax harness antigravity-interactions`,
-ActorTemplate `ax-harness-interactions-template`) calls the Vertex AI GenAI API
+ActorTemplate `conductor-harness-interactions-template`) calls the Vertex AI GenAI API
 and authenticates with the actor's Google Cloud credentials — unlike the default
 Antigravity harness, which uses `GEMINI_API_KEY`.
 
-The worker pods (WorkerPool `ax-harness-workerpool`, namespace `ax`) have no GSA
+The worker pods (WorkerPool `conductor-harness-workerpool`, namespace `ax`) have no GSA
 annotation, so with Workload Identity the actor authenticates **directly as the
 Kubernetes ServiceAccount principal** `ax/default`. Grant that principal
 `roles/aiplatform.user` on the project the harness reads from `GOOGLE_CLOUD_PROJECT`, or
@@ -114,7 +114,7 @@ gcloud projects add-iam-policy-binding "${GOOGLE_CLOUD_PROJECT}" \
 
 ```bash
 # Port-forward the ax-server ReplicaSet
-kubectl port-forward -n ax rs/ax-server 8494:8494
+kubectl port-forward -n conductor rs/ax-server 8494:8494
 ```
 
 ### 3. Test End-to-End
@@ -169,7 +169,7 @@ List the pods running in the `ax` namespace:
 
 ```bash
 # Add `-o wide` to see node/IP assignments, or `-w` to watch status changes.
-kubectl get pods -n ax
+kubectl get pods -n conductor
 ```
 
 ## Substrate compatibility

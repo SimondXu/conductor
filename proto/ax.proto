@@ -19,7 +19,7 @@ package ax;
 import "google/protobuf/struct.proto";
 import "proto/content.proto";
 
-option go_package = "github.com/google/ax/proto";
+option go_package = "github.com/simondxu/conductor/proto";
 
 // WARNING: This file is in active development and
 // significant changes can be made with breaking changes.

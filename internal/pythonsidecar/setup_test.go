@@ -25,8 +25,8 @@ import (
 	"testing/fstest"
 	"time"
 
-	"github.com/google/ax/internal/pythonsidecar"
-	"github.com/google/ax/python"
+	"github.com/simondxu/conductor/internal/pythonsidecar"
+	"github.com/simondxu/conductor/python"
 )
 
 func TestSetup_EmbeddedFS(t *testing.T) {
@@ -41,7 +41,7 @@ func TestSetup_EmbeddedFS(t *testing.T) {
 	}
 
 	targetDir := filepath.Join(t.TempDir(), "home")
-	axDir := filepath.Join(targetDir, ".ax")
+	axDir := filepath.Join(targetDir, ".conductor")
 	t.Setenv("HOME", targetDir)
 
 	opts := pythonsidecar.SetupOptions{
@@ -73,7 +73,7 @@ func TestSetup_EmbeddedFS(t *testing.T) {
 
 func TestSidecar_PythonPath(t *testing.T) {
 	tmpDir := t.TempDir()
-	t.Setenv("AX_DURABLE_DIR", tmpDir)
+	t.Setenv("CONDUCTOR_DURABLE_DIR", tmpDir)
 	customPath := filepath.Join(tmpDir, "custom_python_path")
 	if err := os.MkdirAll(customPath, 0755); err != nil {
 		t.Fatalf("failed to create custom path: %v", err)

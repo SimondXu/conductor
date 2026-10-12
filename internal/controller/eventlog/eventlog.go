@@ -18,7 +18,7 @@ package eventlog
 import (
 	"context"
 
-	"github.com/google/ax/proto"
+	"github.com/simondxu/conductor/proto"
 	"google.golang.org/protobuf/encoding/protojson"
 )
 

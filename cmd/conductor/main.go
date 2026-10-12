@@ -1,0 +1,98 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// Conductor is a server for managing agent orchestrator tasks.
+// It provides commands to execute tasks, resume from checkpoints,
+// register agents, and run the controller server.
+package main
+
+import (
+	"errors"
+	"fmt"
+	"os"
+
+	"github.com/simondxu/conductor/cmd/conductor/internal/cliutil"
+	"github.com/spf13/cobra"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+)
+
+func main() {
+	if err := rootCmd.Execute(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+var rootCmd = &cobra.Command{
+	Use:   "conductor",
+	Short: "Execute a conversation or resume an existing one",
+	Long: `Execute a new conversation or resume an existing one.
+If no conversation ID is provided, a new UUID will be generated.`,
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE:          runExec,
+}
+
+func init() {
+	registerExecFlags(rootCmd)
+
+	rootCmd.AddCommand(execCmd)
+	rootCmd.AddCommand(serveCmd)
+	rootCmd.AddCommand(doctorCmd)
+}
+
+func connect(server string) (*grpc.ClientConn, error) {
+	conn, err := grpc.NewClient(server,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to server: %w", err)
+	}
+	return conn, nil
+}
+
+const currentVersion = "v1alpha"
+
+const (
+	defaultConfigFile = "conductor.yaml"
+	// legacyConfigFile is read when defaultConfigFile is absent, for one
+	// release after the rename from ax.
+	legacyConfigFile = "ax.yaml"
+)
+
+func newConfig(cmd *cobra.Command, configFile string) (*cliutil.Config, error) {
+	configFlagChanged := (cmd.Flags().Lookup("config") != nil && cmd.Flags().Changed("config")) ||
+		(cmd.Flags().Lookup("agent-config-file") != nil && cmd.Flags().Changed("agent-config-file"))
+	if !configFlagChanged && configFile == defaultConfigFile {
+		if _, err := os.Stat(configFile); errors.Is(err, os.ErrNotExist) {
+			if _, err := os.Stat(legacyConfigFile); err == nil {
+				configFile = legacyConfigFile
+			}
+		}
+	}
+	cfg, err := cliutil.LoadFromFile(configFile)
+	if errors.Is(err, os.ErrNotExist) && !configFlagChanged {
+		cfg := cliutil.DefaultConfig()
+		cfg.Version = currentVersion
+		return cfg, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("error loading config file '%s': %w", configFile, err)
+	}
+	if cfg.Version != currentVersion {
+		return nil, fmt.Errorf("unsupported config version %q, must be %q", cfg.Version, currentVersion)
+	}
+	return cfg, nil
+}

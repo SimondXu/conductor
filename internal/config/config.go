@@ -21,26 +21,28 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/google/ax/internal/harness"
-	"github.com/google/ax/internal/harness/substrate"
+	"github.com/simondxu/conductor/internal/controller/toolledger"
+	"github.com/simondxu/conductor/internal/harness"
+	"github.com/simondxu/conductor/internal/harness/substrate"
 	"gopkg.in/yaml.v3"
 )
 
 const (
 	// The substrate namespace reserved for AX's built-in harnesses.
-	defaultNamespace = "ax"
+	defaultNamespace = "conductor"
 	// The port for harnesses running as substrate actors. Substrate's
 	// actor networking DNATs inbound workerPodIP:80 to the actor.
 	substrateDefaultPort = 80
 	// Harness IDs reserved for AX's built-in harnesses.
 	AntigravityHarnessID             = "antigravity"
 	AntigravityInteractionsHarnessID = "antigravity-interactions"
+	FakeHarnessID                    = "fake"
 	// AntigravityHarnessTemplate is the substrate ActorTemplate that runs the
 	// Antigravity harness.
-	AntigravityHarnessTemplate = "ax-harness-antigravity-template"
+	AntigravityHarnessTemplate = "conductor-harness-antigravity-template"
 	// AntigravityInteractionsTemplate is the substrate ActorTemplate that runs
 	// the Antigravity Interactions harness.
-	AntigravityInteractionsTemplate = "ax-harness-interactions-template"
+	AntigravityInteractionsTemplate = "conductor-harness-interactions-template"
 )
 
 // Config represents the main configuration for the AX harness server.
@@ -99,12 +101,40 @@ type RegistryConfig struct {
 	Antigravity             AntigravityHarnessConfig             `yaml:"antigravity,omitempty"`
 	AntigravityInteractions AntigravityInteractionsHarnessConfig `yaml:"antigravity-interactions,omitempty"`
 	Substrate               []SubstrateHarnessConfig             `yaml:"substrate,omitempty"`
+	Fake                    FakeHarnessConfig                    `yaml:"fake,omitempty"`
+}
+
+// FakeHarnessConfig registers the deterministic fake harness. It is always
+// registered; these fields only choose where it runs and where its tool
+// effects are recorded.
+type FakeHarnessConfig struct {
+	Default bool `yaml:"default,omitempty"`
+	// Endpoint is the HarnessService address of a `conductor harness fake`
+	// process. Empty runs the harness in-process.
+	Endpoint string `yaml:"endpoint,omitempty"`
+	// EffectsDSN is a Postgres DSN for the fake_effects table, expanded with
+	// os.ExpandEnv. Empty records effects in memory. In-process only; a remote
+	// harness takes its own --effects-dsn.
+	EffectsDSN string `yaml:"effects_dsn,omitempty"`
+	// Tools declares the recovery class of the script's tools. Empty declares
+	// the default script's (charge_card IDEMPOTENT, send_email UNSAFE).
+	Tools []ToolConfig `yaml:"tools,omitempty"`
+}
+
+// ToolConfig declares a tool's recovery class (IDEMPOTENT, RECONCILABLE or
+// UNSAFE). Classes are never inferred; an undeclared tool is UNSAFE.
+type ToolConfig struct {
+	Name  string `yaml:"name"`
+	Class string `yaml:"class"`
 }
 
 // AntigravityHarnessConfig registers the built-in Antigravity harness.
 type AntigravityHarnessConfig struct {
 	Default  bool   `yaml:"default,omitempty"`
 	Endpoint string `yaml:"endpoint,omitempty"` // HarnessService address
+	// Disabled skips registering the harness, so a controller without Python
+	// does not try to install and fork the sidecar.
+	Disabled bool `yaml:"disabled,omitempty"`
 }
 
 // AntigravityInteractionsHarnessConfig registers the built-in Antigravity
@@ -251,7 +281,7 @@ type SkillRefConfig struct {
 // from a user-provided container image.
 type SubstrateHarnessConfig struct {
 	ID        string `yaml:"id"`                // Unique harness identifier
-	Namespace string `yaml:"namespace"`         // ActorTemplate namespace (user-owned, not "ax")
+	Namespace string `yaml:"namespace"`         // ActorTemplate namespace (user-owned, not "conductor")
 	Template  string `yaml:"template"`          // ActorTemplate name
 	Port      int    `yaml:"port,omitempty"`    // HarnessService port
 	Default   bool   `yaml:"default,omitempty"` // Default harness or not
@@ -325,9 +355,15 @@ func (c *Config) Validate() error {
 
 	var defaultCount int
 	if c.Antigravity.Default || c.Registry.Antigravity.Default {
+		if c.Antigravity.Disabled || c.Registry.Antigravity.Disabled {
+			return fmt.Errorf("the antigravity harness is both default and disabled")
+		}
 		defaultCount++
 	}
 	if c.Registry.AntigravityInteractions.Default {
+		defaultCount++
+	}
+	if c.Registry.Fake.Default {
 		defaultCount++
 	}
 
@@ -335,7 +371,7 @@ func (c *Config) Validate() error {
 		if sc.ID == "" {
 			return fmt.Errorf("substrate harness id is required")
 		}
-		if sc.ID == AntigravityHarnessID || sc.ID == AntigravityInteractionsHarnessID {
+		if sc.ID == AntigravityHarnessID || sc.ID == AntigravityInteractionsHarnessID || sc.ID == FakeHarnessID {
 			return fmt.Errorf("substrate harness id %q is reserved for built-in harnesses", sc.ID)
 		}
 		if sc.Namespace == "" {
@@ -352,6 +388,15 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	for _, tc := range c.Registry.Fake.Tools {
+		if tc.Name == "" {
+			return fmt.Errorf("registry.fake.tools: name is required")
+		}
+		if _, err := toolledger.ParseClass(tc.Class); err != nil {
+			return fmt.Errorf("registry.fake.tools %q: %w", tc.Name, err)
+		}
+	}
+
 	if defaultCount > 1 {
 		return fmt.Errorf("multiple harnesses marked as default")
 	}
@@ -363,13 +408,13 @@ func (c *Config) Validate() error {
 	return nil
 }
 
-func AXAssetsDir() (string, error) {
-	if dir := os.Getenv("AX_DURABLE_DIR"); dir != "" {
-		return filepath.Join(dir, ".ax"), nil
+func AssetsDir() (string, error) {
+	if dir := os.Getenv("CONDUCTOR_DURABLE_DIR"); dir != "" {
+		return filepath.Join(dir, ".conductor"), nil
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("resolving home directory: %w", err)
 	}
-	return filepath.Join(home, ".ax"), nil
+	return filepath.Join(home, ".conductor"), nil
 }

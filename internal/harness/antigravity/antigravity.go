@@ -17,7 +17,6 @@ package antigravity
 import (
 	"context"
 	"fmt"
-	"io"
 	"net"
 	"os"
 	"os/signal"
@@ -30,11 +29,12 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
-	"github.com/google/ax/internal/config"
-	"github.com/google/ax/internal/harness"
-	"github.com/google/ax/internal/pythonsidecar"
-	"github.com/google/ax/proto"
-	"github.com/google/ax/python"
+	"github.com/simondxu/conductor/internal/config"
+	"github.com/simondxu/conductor/internal/harness"
+	"github.com/simondxu/conductor/internal/harness/remote"
+	"github.com/simondxu/conductor/internal/pythonsidecar"
+	"github.com/simondxu/conductor/proto"
+	"github.com/simondxu/conductor/python"
 	"github.com/google/uuid"
 )
 
@@ -43,13 +43,13 @@ var _ harness.Harness = (*AntigravityHarness)(nil)
 var _ harness.Execution = (*antigravityExecution)(nil)
 
 // DefaultStateDir returns the default trajectory storage directory,
-// ~/.ax/antigravity/conversations. AX owns this path so it stays a harness
+// ~/.conductor/antigravity/conversations. AX owns this path so it stays a harness
 // implementation detail rather than a user-facing ax.yaml knob. It lives
 // outside the agent's working directory on purpose: the working directory is
 // the agent's operating surface (it reads and edits files there), so AX's
 // internal state is kept separate to avoid the agent seeing or clobbering it.
 func DefaultStateDir() (string, error) {
-	axDir, err := config.AXAssetsDir()
+	axDir, err := config.AssetsDir()
 	if err != nil {
 		return "", err
 	}
@@ -177,7 +177,6 @@ func (e *antigravityExecution) Run(ctx context.Context, handler harness.Handler)
 		return fmt.Errorf("no input messages queued for execution turn")
 	}
 
-	// 1. Connect to the gRPC server
 	dialOpts := []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}
 	dialOpts = append(dialOpts, grpc.WithStatsHandler(otelgrpc.NewClientHandler()))
 	conn, err := grpc.DialContext(ctx, e.harness.address, dialOpts...)
@@ -186,38 +185,7 @@ func (e *antigravityExecution) Run(ctx context.Context, handler harness.Handler)
 	}
 	defer conn.Close()
 
-	// 2. Create HarnessService client.
-	client := proto.NewHarnessServiceClient(conn)
-
-	// 3. Build standard HarnessRequest.
-	start := &proto.HarnessRequest{
-		ConversationId: e.conversationID,
-		AgentId:        "antigravity",
-		Type: &proto.HarnessRequest_Start{
-			Start: &proto.HarnessStart{
-				AgentConfig: e.config,
-				Steps:       inputs,
-			},
-		},
-	}
-
-	// 4. Call Connect to start bidirectional streaming
-	stream, err := client.Connect(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to call gRPC HarnessService.Connect: %w", err)
-	}
-	// A server that fails before reading the start frame makes Send/CloseSend
-	// report io.EOF; the real status is surfaced by DrainStream's Recv below, so
-	// only treat non-EOF errors as send failures.
-	if err := stream.Send(start); err != nil && err != io.EOF {
-		return fmt.Errorf("failed to send harness start: %w", err)
-	}
-	if err := stream.CloseSend(); err != nil && err != io.EOF {
-		return fmt.Errorf("failed to close stream send direction: %w", err)
-	}
-
-	// 5. Stream responses and trigger callbacks
-	return harness.DrainStream(ctx, stream, e.id, handler)
+	return remote.Turn(ctx, proto.NewHarnessServiceClient(conn), e.conversationID, "antigravity", e.config, inputs, e.id, handler)
 }
 
 // Close implements Execution.Close.

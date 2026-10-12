@@ -16,7 +16,7 @@
 # single source into two places:
 #   - the ax-server-config ConfigMap (mounted at /etc/ax/ax.yaml), read by the
 #     controller (`ax serve`); and
-#   - the AX_CONFIG_CONTENT env (base64 of this file) on each ActorTemplate,
+#   - the CONDUCTOR_CONFIG_CONTENT env (base64 of this file) on each ActorTemplate,
 #     so a substrate actor can read its config.
 version: v1alpha
 

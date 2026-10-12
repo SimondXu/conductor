@@ -25,8 +25,8 @@ import (
 	"testing"
 
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
-	"github.com/google/ax/internal/harness"
-	"github.com/google/ax/proto"
+	"github.com/simondxu/conductor/internal/harness"
+	"github.com/simondxu/conductor/proto"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/health"

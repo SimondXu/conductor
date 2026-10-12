@@ -345,29 +345,29 @@ func TestValidate_SkillsSelectionOneof(t *testing.T) {
 
 func TestAXAssetsDir(t *testing.T) {
 	t.Run("durable-dir env roots the .ax tree on the volume", func(t *testing.T) {
-		t.Setenv("AX_DURABLE_DIR", "/mnt/durable")
-		got, err := AXAssetsDir()
+		t.Setenv("CONDUCTOR_DURABLE_DIR", "/mnt/durable")
+		got, err := AssetsDir()
 		if err != nil {
-			t.Fatalf("AXAssetsDir: %v", err)
+			t.Fatalf("AssetsDir: %v", err)
 		}
-		want := filepath.Join("/mnt/durable", ".ax")
+		want := filepath.Join("/mnt/durable", ".conductor")
 		if got != want {
-			t.Errorf("AXAssetsDir() = %q, want %q", got, want)
+			t.Errorf("AssetsDir() = %q, want %q", got, want)
 		}
 	})
 	t.Run("unset roots under the home directory", func(t *testing.T) {
-		t.Setenv("AX_DURABLE_DIR", "")
+		t.Setenv("CONDUCTOR_DURABLE_DIR", "")
 		home, err := os.UserHomeDir()
 		if err != nil {
 			t.Skipf("no home directory: %v", err)
 		}
-		got, err := AXAssetsDir()
+		got, err := AssetsDir()
 		if err != nil {
-			t.Fatalf("AXAssetsDir: %v", err)
+			t.Fatalf("AssetsDir: %v", err)
 		}
-		want := filepath.Join(home, ".ax")
+		want := filepath.Join(home, ".conductor")
 		if got != want {
-			t.Errorf("AXAssetsDir() = %q, want %q", got, want)
+			t.Errorf("AssetsDir() = %q, want %q", got, want)
 		}
 	})
 }

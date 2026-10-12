@@ -24,23 +24,14 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
-	"sync"
 	"syscall"
 
-	"github.com/google/ax/internal/harness"
-	"github.com/google/ax/proto"
+	"github.com/simondxu/conductor/internal/harness/remote"
+	"github.com/simondxu/conductor/proto"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/health"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 )
-
-// server adapts the Antigravity Interactions harness (a Go harness.Harness) onto
-// the gRPC HarnessService that the AX controller connects to. One server serves
-// one actor's lifetime; substrate creates the actor per request.
-type server struct {
-	proto.UnimplementedHarnessServiceServer
-	h harness.Harness
-}
 
 // Serve builds the Antigravity Interactions harness from cfg and serves the
 // HarnessService (plus gRPC health) on host:port, and an HTTP /readyz endpoint on
@@ -59,7 +50,7 @@ func Serve(ctx context.Context, cfg AntigravityInteractionsConfig, host string, 
 	}
 
 	grpcServer := grpc.NewServer()
-	proto.RegisterHarnessServiceServer(grpcServer, &server{h: h})
+	proto.RegisterHarnessServiceServer(grpcServer, remote.NewServer(h))
 
 	// gRPC health: report SERVING for the default service so the controller's
 	// health checks pass.
@@ -107,119 +98,4 @@ func serveReadyz(host string, readyzPort int) *http.Server {
 		}
 	}()
 	return srv
-}
-
-// Connect drives one harness execution. Per the HarnessService contract, the
-// client sends HarnessRequest{start} (and may send one HarnessRequest{cancel}
-// mid-stream); the server streams zero or more HarnessResponse{outputs} frames
-// terminated by exactly one HarnessResponse{end}.
-func (s *server) Connect(stream proto.HarnessService_ConnectServer) error {
-	ctx, cancel := context.WithCancel(stream.Context())
-	defer cancel()
-
-	// The first frame must be a start.
-	req, err := stream.Recv()
-	if err != nil {
-		return err
-	}
-	start := req.GetStart()
-	if start == nil {
-		return fmt.Errorf("first HarnessRequest must be a start frame")
-	}
-	convID := req.GetConversationId()
-
-	exec, err := s.h.Start(ctx, convID, start.GetAgentConfig())
-	if err != nil {
-		return sendEnd(stream, convID, proto.State_STATE_FAILED, err)
-	}
-	defer func() { _ = exec.Close(context.WithoutCancel(ctx)) }()
-
-	if len(start.GetSteps()) > 0 {
-		if err := exec.Queue(ctx, start.GetSteps()...); err != nil {
-			return sendEnd(stream, convID, proto.State_STATE_FAILED, err)
-		}
-	}
-
-	// Watch for a mid-stream cancel frame; it cancels the run's context.
-	//
-	// Note: mid-run steering (injecting extra human input while a turn is running)
-	// is intentionally NOT supported here. The execution can accept steering via
-	// Queue, but the HarnessRequest oneof only defines {start, cancel} -- there is
-	// no wire frame to carry additional input after start -- so a client cannot
-	// deliver steering over Connect. Multi-turn conversation is instead expressed
-	// as separate Connect executions that resume via the persisted cursor. Any
-	// non-cancel frame received here is therefore ignored.
-	go func() {
-		for {
-			r, err := stream.Recv()
-			if err != nil {
-				return // stream closed or errored; run ends by other means
-			}
-			if r.GetCancel() != nil {
-				cancel()
-				return
-			}
-		}
-	}()
-
-	// Run the turn, forwarding each agent message as an outputs frame.
-	handler := &streamHandler{stream: stream, convID: convID}
-	if err := exec.Run(ctx, handler); err != nil {
-		if ctx.Err() != nil {
-			return sendEnd(stream, convID, proto.State_STATE_CANCELED, ctx.Err())
-		}
-		return sendEnd(stream, convID, proto.State_STATE_FAILED, err)
-	}
-	if serr := handler.err(); serr != nil {
-		return serr // failed while sending an outputs frame; stream is broken
-	}
-	return sendEnd(stream, convID, proto.State_STATE_COMPLETED, nil)
-}
-
-// streamHandler forwards each message the harness produces during a turn as a
-// HarnessResponse{outputs} frame.
-type streamHandler struct {
-	stream proto.HarnessService_ConnectServer
-	convID string
-
-	mu      sync.Mutex
-	sendErr error
-}
-
-var _ harness.Handler = (*streamHandler)(nil)
-
-func (h *streamHandler) OnMessage(_ context.Context, _ string, step *proto.Step) error {
-	err := h.stream.Send(&proto.HarnessResponse{
-		ConversationId: h.convID,
-		Type: &proto.HarnessResponse_Outputs{
-			Outputs: &proto.HarnessOutputs{Steps: []*proto.Step{step}},
-		},
-	})
-	if err != nil {
-		h.mu.Lock()
-		h.sendErr = err
-		h.mu.Unlock()
-	}
-	return err
-}
-
-func (h *streamHandler) OnComplete(_ context.Context, _ string) error { return nil }
-
-func (h *streamHandler) err() error {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return h.sendErr
-}
-
-// sendEnd sends the single terminal HarnessResponse{end} frame. If err is
-// non-nil, it is attached as the terminal Error.
-func sendEnd(stream proto.HarnessService_ConnectServer, convID string, state proto.State, err error) error {
-	end := &proto.HarnessEnd{State: state}
-	if err != nil {
-		end.Error = &proto.Error{Description: err.Error()}
-	}
-	return stream.Send(&proto.HarnessResponse{
-		ConversationId: convID,
-		Type:           &proto.HarnessResponse_End{End: end},
-	})
 }
