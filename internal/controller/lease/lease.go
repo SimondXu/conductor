@@ -29,6 +29,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
+	"github.com/simondxu/conductor/internal/chaos"
 )
 
 // Lease metrics (docs/conductor/ARCHITECTURE.md §7.2).
@@ -98,7 +99,10 @@ func KeepAlive(ctx context.Context, h Held, period time.Duration) {
 		case <-t.C:
 		}
 		rctx, cancel := context.WithTimeout(ctx, period)
-		_ = h.Renew(rctx) // a transient failure is retried; the deadline bounds it
+		err := h.Renew(rctx) // a transient failure is retried; the deadline bounds it
 		cancel()
+		if err == nil {
+			chaos.At(ctx, chaos.LeaseRenewed, "")
+		}
 	}
 }

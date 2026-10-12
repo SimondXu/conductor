@@ -894,6 +894,25 @@ tool_effect_done · tool_settled · event_appended · lease_renewed
 The hook aborts the process (`os.Exit`) rather than unwinding, so the failure
 resembles a real kill. Determinism comes from `fake`.
 
+**As built [M9] (`internal/chaos`).** `CONDUCTOR_CHAOS_KILL_AT=<boundary>[:<tool>]`
+is read at startup; an unknown boundary, or a tool name on a boundary that is
+not `tool_*`, panics. The process exits with status 137 at the first match,
+after logging `chaos.kill`. Where each fires:
+
+- `model_started` / `model_completed`: around a model turn's `Run`, in the
+  controller. At `model_completed` the turn's calls are logged, not planned.
+- `tool_planned`, `tool_started`, `tool_settled`: right after the ledger
+  write, once per call, matched against the call's tool.
+- `tool_effect_done`: in the `fake` harness, after the first effect for a
+  key is recorded and before the result is returned. It does not fire on a
+  retry, so a harness that restarts armed does not crash-loop.
+- `event_appended`: after every successful append, the first being the
+  user input.
+- `lease_renewed`: after a successful renewal in `lease.KeepAlive`.
+
+`TestChaosBoundaries` checks what the ledger and the effects show at each
+point.
+
 ### 8.2 Detecting duplicate effects mechanically
 
 `fake` appends every side effect to `fake_effects`; a duplicate is more than one

@@ -53,3 +53,10 @@ func rebuild(events []*proto.StepEvent) (runState, error) {
 	}
 	return st, nil
 }
+
+// Rebuild is rebuild for checkers outside the package (I6): the state and
+// the history the log alone gives a conversation.
+func Rebuild(events []*proto.StepEvent) (proto.State, []*proto.Step, error) {
+	st, err := rebuild(events)
+	return st.State, st.History, err
+}

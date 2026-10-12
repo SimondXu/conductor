@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/simondxu/conductor/internal/chaos"
 	"github.com/simondxu/conductor/internal/controller/eventlog"
 	"github.com/simondxu/conductor/internal/controller/lease"
 	"github.com/simondxu/conductor/internal/controller/toolledger"
@@ -485,18 +486,33 @@ func (d *Controller) runTurn(ctx context.Context, held lease.Held, harnessID str
 	if err := d.startCalls(ctx, gen, pending); err != nil {
 		return err
 	}
+	for _, c := range pending {
+		chaos.At(ctx, chaos.ToolStarted, c.GetFunctionCall().GetName())
+	}
 	if err := exec.Queue(runCtx, history...); err != nil {
 		return fmt.Errorf("failed to queue history: %w", err)
 	}
+	if kind == "model" {
+		chaos.At(ctx, chaos.ModelStarted, "")
+	}
 	runErr := exec.Run(runCtx, th)
+	if kind == "model" {
+		chaos.At(ctx, chaos.ModelCompleted, "")
+	}
 	// Ledger writes after a failed turn must survive the cancellation that
 	// may have failed it.
 	lctx := context.WithoutCancel(ctx)
 	if err := d.planCalls(lctx, gen, harnessID, th.planned); err != nil {
 		return err
 	}
+	for _, p := range th.planned {
+		chaos.At(ctx, chaos.ToolPlanned, p.ToolName)
+	}
 	if err := d.settleCalls(lctx, gen, pending, th.emitted, runErr); err != nil {
 		return err
+	}
+	for _, c := range pending {
+		chaos.At(ctx, chaos.ToolSettled, c.GetFunctionCall().GetName())
 	}
 	if runErr != nil {
 		return fmt.Errorf("harness execution failed: %w", runErr)
@@ -712,6 +728,7 @@ func (l *logger) append(ctx context.Context, ev *proto.StepEvent) (int64, error)
 	for attempt := range appendAttempts {
 		var step int64
 		if step, err = l.el.Append(ctx, ev, l.gen); err == nil {
+			chaos.At(ctx, chaos.EventAppended, "")
 			return step, nil
 		}
 		// A fenced write fails the same way every time: ownership is gone.
