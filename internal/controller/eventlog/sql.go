@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/simondxu/conductor/internal/controller/lease"
 	"github.com/simondxu/conductor/proto"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -31,13 +32,14 @@ import (
 // PostgreSQL implementations.
 type sqlEventLog struct {
 	db *sql.DB
-	// projectRuns keeps the runs projection (PostgreSQL only).
-	projectRuns bool
+	// postgres fences appends on the lease generation, records it, and keeps
+	// the runs projection.
+	postgres bool
 }
 
 // Append serializes the event to JSON and inserts it into the database. It is
 // idempotent on event.EventId when that is set.
-func (l *sqlEventLog) Append(ctx context.Context, event *proto.StepEvent) (step int64, err error) {
+func (l *sqlEventLog) Append(ctx context.Context, event *proto.StepEvent, gen int64) (step int64, err error) {
 	ctx, endSpan := l.startSpan(ctx, "Append", event.ConversationId)
 	defer func() { endSpan(err) }()
 
@@ -46,6 +48,12 @@ func (l *sqlEventLog) Append(ctx context.Context, event *proto.StepEvent) (step 
 		return 0, fmt.Errorf("eventlog: begin tx: %w", err)
 	}
 	defer tx.Rollback()
+
+	if l.postgres {
+		if err := lease.CheckFence(ctx, tx, event.ConversationId, gen); err != nil {
+			return 0, err
+		}
+	}
 
 	if err := tx.QueryRowContext(ctx, "SELECT COALESCE(MAX(step), 0) + 1 FROM conversation_log WHERE conversation_id = $1", event.ConversationId).Scan(&step); err != nil {
 		return 0, fmt.Errorf("eventlog: compute step: %w", err)
@@ -63,11 +71,19 @@ func (l *sqlEventLog) Append(ctx context.Context, event *proto.StepEvent) (step 
 		eventID = event.EventId
 	}
 	inserted := true
-	err = tx.QueryRowContext(ctx, `
+	insert := `
 		INSERT INTO conversation_log (conversation_id, step, payload, event_id) VALUES ($1, $2, $3, $4)
 		ON CONFLICT (event_id) WHERE event_id IS NOT NULL DO NOTHING
-		RETURNING step`,
-		event.ConversationId, step, string(payload), eventID).Scan(&step)
+		RETURNING step`
+	args := []any{event.ConversationId, step, string(payload), eventID}
+	if l.postgres {
+		insert = `
+		INSERT INTO conversation_log (conversation_id, step, payload, event_id, generation) VALUES ($1, $2, $3, $4, $5)
+		ON CONFLICT (event_id) WHERE event_id IS NOT NULL DO NOTHING
+		RETURNING step`
+		args = append(args, gen)
+	}
+	err = tx.QueryRowContext(ctx, insert, args...).Scan(&step)
 	if errors.Is(err, sql.ErrNoRows) {
 		inserted = false
 		err = tx.QueryRowContext(ctx, "SELECT step FROM conversation_log WHERE event_id = $1", eventID).Scan(&step)
@@ -75,7 +91,7 @@ func (l *sqlEventLog) Append(ctx context.Context, event *proto.StepEvent) (step 
 	if err != nil {
 		return 0, fmt.Errorf("eventlog: insert conversation: %w", err)
 	}
-	if inserted && l.projectRuns {
+	if inserted && l.postgres {
 		if err := projectRun(ctx, tx, event, step); err != nil {
 			return 0, err
 		}

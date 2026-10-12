@@ -479,8 +479,9 @@ never a second code path.
   (`eventlog/runs.go`): PENDING `runs` ∪ conversations with a `STARTED` or
   `OUTCOME_UNKNOWN` call, restricted to this replica's `recovery: full`
   harnesses, with backoff elapsed and lease absent or expired. A call with no
-  `runs` row has no backoff to record, so it is ordered last rather than
-  starving the rest. `UnsettledAnywhere` is not a separate ledger method.
+  `runs` row is not a candidate: `runs` is written with the log, so its
+  conversation has no log to recover from. `UnsettledAnywhere` is not a
+  separate ledger method.
 - **No `FOR UPDATE SKIP LOCKED`.** The lease is the lock: `Acquire` is one
   conditional statement, and the replica that loses gets `ErrHeld` and moves
   on.
@@ -621,6 +622,38 @@ original process is still running.
 The guarantee is **at most one *committing* writer**, not one *running
 process*. Stated as a named caveat beside the exactly-once prohibition
 (`correctness.md` §0.2).
+
+**As built [M7].**
+
+- **The fence is a shared lock on the lease row, in the write's own
+  transaction** (`lease.CheckFence`). Every `Append` (which now also records
+  `conversation_log.generation`, migration 0006) and every ledger write
+  (`Plan`, and each transition after it locks the call row) first runs
+  `SELECT generation … FOR SHARE`. It then fails with `lease.ErrFenced`
+  unless the generation matches, and counts
+  `conductor_fenced_writes_rejected_total`. A takeover's `UPDATE` waits for
+  that lock, so no write at the old generation can commit after a newer
+  generation exists. The holder whose lease merely expired is still the
+  current generation until someone takes over, and its writes are accepted;
+  that is I4 as stated.
+- **Generation 0 is accepted only for a conversation that has no lease
+  row** (SQLite, or a database used without leases). Otherwise an unleased
+  writer could bypass the fence.
+- **`ExpireDeadlines` is not fenced.** It is a database-wide janitor with no
+  generation, and it only moves `OUTCOME_UNKNOWN` calls past their deadline,
+  which no owner may still resolve.
+- **A fenced append is not retried.** It fails the same way every time.
+- **SIGTERM (`serve`):** stop the reconciler, give in-flight RPCs
+  `--drain-timeout` (default 20 s) to finish, then cancel them. Each `Exec`
+  releases its lease as it unwinds, and `serve` waits for every `Exec`
+  (`Controller.Wait`) before closing its pools. `server.GracefulStop` no
+  longer closes the controller first; the upstream code did, which would
+  have failed the very writes and releases a drain exists for.
+- **Compose runs three replicas.** Only the first publishes a host port.
+  `smoke.sh` SIGKILLs the owner mid-tool-call, and a surviving replica
+  completes the run after the lease ttl. It also SIGTERMs the owner, and a
+  replica takes over without waiting out the lease (`kill_kind="graceful"`).
+  Each run ends once (I3′ and I1b are checked).
 
 ### 6.3 Reconnect: the `inFlight` behaviour is a user-visible contract **[R2]**
 

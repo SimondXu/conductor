@@ -19,9 +19,11 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"strings"
+	"slices"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
+
+	"github.com/simondxu/conductor/internal/controller/lease"
 )
 
 // Postgres is the Ledger on the tool_calls table (migration 0002).
@@ -49,8 +51,15 @@ func (p *Postgres) Plan(ctx context.Context, gen int64, calls ...PlannedCall) er
 		return fmt.Errorf("toolledger: plan: %w", err)
 	}
 	defer tx.Rollback()
+	fenced := map[string]bool{}
 	var inserted []PlannedCall
 	for _, c := range calls {
+		if !fenced[c.ConversationID] {
+			if err := lease.CheckFence(ctx, tx, c.ConversationID, gen); err != nil {
+				return err
+			}
+			fenced[c.ConversationID] = true
+		}
 		res, err := tx.ExecContext(ctx, `
 			INSERT INTO tool_calls (call_id, conversation_id, step, tool_name, args_hash, args,
 			                        idempotency_key, class, state, generation)
@@ -74,7 +83,7 @@ func (p *Postgres) Plan(ctx context.Context, gen int64, calls ...PlannedCall) er
 }
 
 func (p *Postgres) Start(ctx context.Context, gen int64, callID string) error {
-	return p.transition(ctx, callID, Started, []State{Planned, OutcomeUnknown}, `
+	return p.transition(ctx, gen, callID, Started, []State{Planned, OutcomeUnknown}, `
 		state = 'STARTED', attempts = t.attempts + 1, started_at = now(),
 		reconcile_deadline = now() + make_interval(secs => $3), generation = $2`,
 		callID, gen, ReconcileWindow.Seconds())
@@ -90,53 +99,58 @@ func (p *Postgres) Settle(ctx context.Context, gen int64, callID string, out Out
 	if out.Result != nil {
 		result = string(out.Result)
 	}
-	return p.transition(ctx, callID, out.State, []State{Started, OutcomeUnknown}, `
+	return p.transition(ctx, gen, callID, out.State, []State{Started, OutcomeUnknown}, `
 		state = $3, result = $4, error = NULLIF($5, ''), settled_at = now(), generation = $2`,
 		callID, gen, string(out.State), result, out.Error)
 }
 
 func (p *Postgres) MarkUnknown(ctx context.Context, gen int64, callID, reason string) error {
-	return p.transition(ctx, callID, OutcomeUnknown, []State{Started}, `
+	return p.transition(ctx, gen, callID, OutcomeUnknown, []State{Started}, `
 		state = 'OUTCOME_UNKNOWN', error = $3, generation = $2`,
 		callID, gen, reason)
 }
 
 // transition moves callID from one of from to target with the assignments
-// set ($1 is the call_id). The row is locked first so the state it moved
-// from is exact, for the metrics. When no row moves, a call already in the
-// target state is a no-op; anything else is ErrTransition.
-func (p *Postgres) transition(ctx context.Context, callID string, target State, from []State, set string, args ...any) error {
-	froms := make([]string, len(from))
-	for i, f := range from {
-		froms[i] = string(f)
-	}
-	var prev State
-	var tool string
-	var class Class
-	var secs float64
-	err := p.db.QueryRowContext(ctx, `
-		WITH o AS (SELECT call_id, state FROM tool_calls WHERE call_id = $1 FOR UPDATE)
-		UPDATE tool_calls t SET `+set+`
-		  FROM o
-		 WHERE t.call_id = o.call_id AND o.state = ANY('{`+strings.Join(froms, ",")+`}')
-		RETURNING o.state, t.tool_name, t.class,
-		          COALESCE(EXTRACT(EPOCH FROM t.settled_at - t.started_at), 0)::float8`,
-		args...).Scan(&prev, &tool, &class, &secs)
-	if err == nil {
-		observeTransition(prev, target, tool, class, secs)
-		return nil
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
+// set ($1 is the call_id), fenced on gen (I4). The row is locked first, so
+// the state it moved from is exact, for the metrics. A call already in the
+// target state is a no-op; any other state is ErrTransition.
+func (p *Postgres) transition(ctx context.Context, gen int64, callID string, target State, from []State, set string, args ...any) error {
+	tx, err := p.db.BeginTx(ctx, nil)
+	if err != nil {
 		return fmt.Errorf("toolledger: %s %s: %w", target, callID, err)
 	}
-	var current State
-	if err := p.db.QueryRowContext(ctx, "SELECT state FROM tool_calls WHERE call_id = $1", callID).Scan(&current); err != nil {
-		return fmt.Errorf("%w: %s %s: %v", ErrTransition, target, callID, err)
+	defer tx.Rollback()
+	var prev State
+	var conv, tool string
+	var class Class
+	err = tx.QueryRowContext(ctx, `
+		SELECT state, conversation_id, tool_name, class FROM tool_calls WHERE call_id = $1 FOR UPDATE`,
+		callID).Scan(&prev, &conv, &tool, &class)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("%w: %s %s: no such call", ErrTransition, target, callID)
 	}
-	if current == target && target != Started {
-		return nil
+	if err != nil {
+		return fmt.Errorf("toolledger: %s %s: %w", target, callID, err)
 	}
-	return fmt.Errorf("%w: %s -> %s for %s", ErrTransition, current, target, callID)
+	if err := lease.CheckFence(ctx, tx, conv, gen); err != nil {
+		return err
+	}
+	if !slices.Contains(from, prev) {
+		if prev == target && target != Started {
+			return nil
+		}
+		return fmt.Errorf("%w: %s -> %s for %s", ErrTransition, prev, target, callID)
+	}
+	var secs float64
+	if err := tx.QueryRowContext(ctx, `UPDATE tool_calls t SET `+set+` WHERE call_id = $1
+		RETURNING COALESCE(EXTRACT(EPOCH FROM settled_at - started_at), 0)::float8`, args...).Scan(&secs); err != nil {
+		return fmt.Errorf("toolledger: %s %s: %w", target, callID, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("toolledger: %s %s: %w", target, callID, err)
+	}
+	observeTransition(prev, target, tool, class, secs)
+	return nil
 }
 
 // DeadlineExceeded is the error of a call abandoned at its reconcile_deadline.

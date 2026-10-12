@@ -405,7 +405,7 @@ func TestRecover_UnplannedCallIsPlannedAndRun(t *testing.T) {
 	if _, err := r.log.Append(context.Background(), &proto.StepEvent{
 		ConversationId: r.conv, AgentId: "fake", AgentConfig: cfg, State: proto.State_STATE_PENDING,
 		Steps: []*proto.Step{harnesstest.UserStep("go"), call},
-	}); err != nil {
+	}, 0); err != nil {
 		t.Fatal(err)
 	}
 	if err := r.resume(); err != nil {

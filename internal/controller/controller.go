@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -46,6 +47,7 @@ type Controller struct {
 	lease    lease.Lease
 	ownerID  string
 	leaseTTL time.Duration
+	active   sync.WaitGroup // Exec calls in progress
 }
 
 // Config configures the controller.
@@ -107,6 +109,8 @@ func New(ctx context.Context, cfg Config) (*Controller, error) {
 // If id is empty, a UUID will be generated.
 // If the execution already exists, it will be resumed with optional new inputs.
 func (d *Controller) Exec(ctx context.Context, req *proto.CreateInteractionEvent, handler ExecHandler) (err error) {
+	d.active.Add(1)
+	defer d.active.Done()
 	runsActive.WithLabelValues(d.ownerID).Inc()
 	start := time.Now()
 	defer func() {
@@ -135,6 +139,7 @@ func (d *Controller) exec(ctx context.Context, req *proto.CreateInteractionEvent
 	// TODO(anj): We need to consolidate agents and harness registration.
 	// Adding harness registration support temporarily.
 	l := newLogger(d.eventLog, req.ConversationId, req.AgentId)
+	l.gen = gen
 	events, err := d.eventLog.Events(ctx, req.ConversationId)
 	if err != nil {
 		return fmt.Errorf("failed to check resumption state: %w", err)
@@ -501,6 +506,10 @@ func (t *turnHandler) OnMessage(ctx context.Context, execID string, step *proto.
 
 func (t *turnHandler) OnComplete(ctx context.Context, execID string) error { return nil }
 
+// Wait blocks until every Exec in progress has returned, and so has released
+// its lease.
+func (d *Controller) Wait() { d.active.Wait() }
+
 // Registry returns the agent registry.
 func (d *Controller) Registry() *Registry {
 	return d.registry
@@ -532,6 +541,8 @@ type logger struct {
 	interactionID  string
 	el             eventlog.EventLog
 	harnessID      string
+	// gen is the lease generation every append carries.
+	gen int64
 }
 
 func newLogger(
@@ -588,10 +599,11 @@ func (l *logger) append(ctx context.Context, ev *proto.StepEvent) (int64, error)
 	var err error
 	for attempt := range appendAttempts {
 		var step int64
-		if step, err = l.el.Append(ctx, ev); err == nil {
+		if step, err = l.el.Append(ctx, ev, l.gen); err == nil {
 			return step, nil
 		}
-		if attempt == appendAttempts-1 {
+		// A fenced write fails the same way every time: ownership is gone.
+		if attempt == appendAttempts-1 || errors.Is(err, lease.ErrFenced) {
 			break
 		}
 		select {

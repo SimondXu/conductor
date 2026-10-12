@@ -16,14 +16,17 @@ package eventlog
 
 import (
 	"context"
+	"errors"
 	"os"
 	"slices"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus"
 
 	schema "github.com/simondxu/conductor/db"
+	"github.com/simondxu/conductor/internal/controller/lease"
 	"github.com/simondxu/conductor/proto"
 )
 
@@ -62,7 +65,7 @@ func appendEvent(t *testing.T, p *Postgres, ev *proto.StepEvent) {
 	if ev.EventId == "" {
 		ev.EventId = uuid.NewString()
 	}
-	if _, err := p.Append(context.Background(), ev); err != nil {
+	if _, err := p.Append(context.Background(), ev, 0); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -159,4 +162,82 @@ func TestBumpRecoveryAttempt(t *testing.T) {
 	if n, err := p.BumpRecoveryAttempt(ctx, "missing-"+uuid.NewString(), backoff); err != nil || n != 0 {
 		t.Errorf("bump of a missing run = %d, %v; want 0", n, err)
 	}
+}
+
+// I4: after a takeover, the old owner's append is rejected by the database,
+// counted, and the new owner's goes through. I3': the log's generations
+// never decrease.
+func TestFencedAppendRejectsStaleGeneration(t *testing.T) {
+	p := openTestPostgres(t)
+	ctx := context.Background()
+	conv := t.Name() + "-" + uuid.NewString()
+	leases, err := lease.OpenPostgres(os.Getenv("PG_TEST_DSN"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { leases.Close() })
+	ev := func() *proto.StepEvent { return &proto.StepEvent{ConversationId: conv, EventId: uuid.NewString()} }
+
+	if _, err := p.Append(ctx, ev(), 0); err != nil {
+		t.Fatalf("unleased append at 0: %v", err)
+	}
+	a, err := leases.Acquire(ctx, conv, "a", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Append(ctx, ev(), a.Generation()); err != nil {
+		t.Fatalf("owner's append: %v", err)
+	}
+	if _, err := p.db.Exec("UPDATE conversation_leases SET expires_at = now() WHERE conversation_id = $1", conv); err != nil {
+		t.Fatal(err)
+	}
+	b, err := leases.Acquire(ctx, conv, "b", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fenced := fencedWrites(t)
+	for _, gen := range []int64{a.Generation(), 0} {
+		if _, err := p.Append(ctx, ev(), gen); !errors.Is(err, lease.ErrFenced) {
+			t.Fatalf("append at stale generation %d: err = %v, want ErrFenced", gen, err)
+		}
+	}
+	if d := fencedWrites(t) - fenced; d != 2 {
+		t.Errorf("fenced writes += %v, want 2", d)
+	}
+	if _, err := p.Append(ctx, ev(), b.Generation()); err != nil {
+		t.Fatalf("new owner's append: %v", err)
+	}
+
+	var gens []int64
+	rows, err := p.db.Query("SELECT generation FROM conversation_log WHERE conversation_id = $1 ORDER BY step", conv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var g int64
+		if err := rows.Scan(&g); err != nil {
+			t.Fatal(err)
+		}
+		gens = append(gens, g)
+	}
+	if want := []int64{0, a.Generation(), b.Generation()}; !slices.Equal(gens, want) {
+		t.Fatalf("logged generations %v, want %v", gens, want)
+	}
+}
+
+// fencedWrites reads conductor_fenced_writes_rejected_total, which package
+// lease owns, from the default registry.
+func fencedWrites(t *testing.T) float64 {
+	t.Helper()
+	mfs, err := prometheus.DefaultGatherer.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, mf := range mfs {
+		if mf.GetName() == "conductor_fenced_writes_rejected_total" {
+			return mf.GetMetric()[0].GetCounter().GetValue()
+		}
+	}
+	return 0
 }

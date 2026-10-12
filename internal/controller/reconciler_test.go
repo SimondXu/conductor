@@ -36,16 +36,19 @@ import (
 )
 
 // recRig is a controller on Postgres with every recovery part: event log
-// with the runs projection, tool ledger, leases.
+// with the runs projection, tool ledger, leases. More controllers on the same
+// database, sharing the effect sink, come from controller.
 type recRig struct {
-	c       *Controller
-	log     eventlog.EventLog
-	runs    eventlog.RunIndex
-	ledger  *toolledger.Postgres
-	leases  *lease.Postgres
-	db      *sql.DB
-	effects *fake.MemoryEffects
-	conv    string
+	c        *Controller
+	log      eventlog.EventLog
+	runs     eventlog.RunIndex
+	ledger   *toolledger.Postgres
+	leases   *lease.Postgres
+	db       *sql.DB
+	effects  *fake.MemoryEffects
+	conv     string
+	dsn      string
+	register func(*Registry, *fake.MemoryEffects)
 }
 
 func newRecRig(t *testing.T, register func(*Registry, *fake.MemoryEffects)) *recRig {
@@ -57,37 +60,117 @@ func newRecRig(t *testing.T, register func(*Registry, *fake.MemoryEffects)) *rec
 	if _, err := schema.Up(dsn); err != nil {
 		t.Fatalf("migrate up: %v", err)
 	}
-	r := &recRig{effects: &fake.MemoryEffects{}, conv: t.Name() + "-" + uuid.NewString()}
+	r := &recRig{effects: &fake.MemoryEffects{}, conv: t.Name() + "-" + uuid.NewString(), dsn: dsn, register: register}
 	var err error
 	if r.log, err = eventlog.OpenPostgresEventLog(dsn); err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { r.log.Close() })
 	r.runs = r.log.(eventlog.RunIndex)
 	if r.ledger, err = toolledger.OpenPostgres(dsn); err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { r.ledger.Close() })
 	if r.leases, err = lease.OpenPostgres(dsn); err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { r.leases.Close() })
 	if r.db, err = sql.Open("pgx", dsn); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { r.db.Close() })
+	r.c = r.controller(t, "test-"+uuid.NewString())
+	return r
+}
+
+// controller is a new controller replica with its own connections.
+func (r *recRig) controller(t *testing.T, ownerID string) *Controller {
+	t.Helper()
+	log, err := eventlog.OpenPostgresEventLog(r.dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger, err := toolledger.OpenPostgres(r.dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leases, err := lease.OpenPostgres(r.dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
 	reg := NewRegistry()
-	register(reg, r.effects)
-	r.c, err = New(context.Background(), Config{
+	r.register(reg, r.effects)
+	c, err := New(context.Background(), Config{
 		Registry:        reg,
-		EventLogBuilder: func() (eventlog.EventLog, error) { return r.log, nil },
-		Ledger:          r.ledger,
-		Lease:           r.leases,
-		OwnerID:         "test-" + uuid.NewString(),
+		EventLogBuilder: func() (eventlog.EventLog, error) { return log, nil },
+		Ledger:          ledger,
+		Lease:           leases,
+		OwnerID:         ownerID,
 		LeaseTTL:        2 * time.Second,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { r.c.Close() })
-	return r
+	t.Cleanup(func() { c.Close() })
+	return c
+}
+
+// reconcile runs c's reconciler loop until the test ends.
+func reconcile(t *testing.T, c *Controller) {
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error)
+	go func() { done <- c.RunReconciler(ctx, ReconcilerConfig{Interval: 100 * time.Millisecond}) }()
+	t.Cleanup(func() {
+		cancel()
+		if err := <-done; err != nil {
+			t.Error(err)
+		}
+	})
+}
+
+// waitState polls the log until the run reaches want.
+func (r *recRig) waitState(t *testing.T, want proto.State) {
+	t.Helper()
+	deadline := time.Now().Add(15 * time.Second)
+	for rebuilt(t, r.log, r.conv).State != want {
+		if time.Now().After(deadline) {
+			t.Fatalf("run did not reach %v", want)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// checkOneTerminalState fails unless the log has exactly one terminal
+// event, COMPLETED, and its generations never decrease (I3').
+func (r *recRig) checkOneTerminalState(t *testing.T) {
+	t.Helper()
+	var terminal []string
+	rows, err := r.db.Query(`SELECT payload::jsonb->>'state' FROM conversation_log
+		WHERE conversation_id = $1 AND payload::jsonb->>'state' IN ('STATE_COMPLETED', 'STATE_FAILED', 'STATE_CANCELED')`, r.conv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var s string
+		if err := rows.Scan(&s); err != nil {
+			t.Fatal(err)
+		}
+		terminal = append(terminal, s)
+	}
+	if len(terminal) != 1 || terminal[0] != "STATE_COMPLETED" {
+		t.Errorf("terminal events %v, want exactly one STATE_COMPLETED", terminal)
+	}
+	var violations int
+	if err := r.db.QueryRow(`SELECT count(*) FROM (
+		SELECT generation, lag(generation) OVER (ORDER BY step) AS prev
+		  FROM conversation_log WHERE conversation_id = $1 AND generation IS NOT NULL) s
+		 WHERE prev IS NOT NULL AND generation < prev`, r.conv).Scan(&violations); err != nil {
+		t.Fatal(err)
+	}
+	if violations != 0 {
+		t.Errorf("I3' violated: generation decreased %d time(s)", violations)
+	}
 }
 
 // The DoD of M4: an owner dies inside a tool turn, still holding its lease.
@@ -171,7 +254,7 @@ func TestReconciler_PoisonsRunThatKeepsFailing(t *testing.T) {
 	if _, err := r.log.Append(ctx, &proto.StepEvent{
 		ConversationId: r.conv, EventId: uuid.NewString(), AgentId: "broken", State: proto.State_STATE_PENDING,
 		Steps: []*proto.Step{harnesstest.UserStep("go")},
-	}); err != nil {
+	}, 0); err != nil {
 		t.Fatal(err)
 	}
 	cfg := ReconcilerConfig{Concurrency: 4, MaxAttempts: 2}
@@ -213,5 +296,113 @@ func TestExec_RefusedWhileLeaseHeld(t *testing.T) {
 	}
 	if len(r.effects.Effects) != 0 {
 		t.Fatal("ran without the lease")
+	}
+}
+
+// M7 DoD: three replicas. The holder dies inside a tool turn with its lease
+// held. B and C both run the reconciler; exactly one takes the run over at a
+// higher generation and completes it once. A's writes at its old generation
+// are rejected by the database, in the log and in the ledger.
+func TestReplicas_KillHolderTransfersOwnership(t *testing.T) {
+	var recovered atomic.Bool
+	r := newRecRig(t, func(reg *Registry, effects *fake.MemoryEffects) {
+		if err := reg.Register("fake", crashingHarness{fake.New(effects), &recovered, false}, RecoveryFull); err != nil {
+			t.Fatal(err)
+		}
+		reg.DeclareTools("fake", map[string]toolledger.Class{"charge_card": toolledger.Idempotent})
+	})
+	ctx := context.Background()
+	b, c := r.controller(t, "replica-b"), r.controller(t, "replica-c")
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = r.c.Exec(ctx, &proto.CreateInteractionEvent{
+			ConversationId: r.conv, AgentId: "fake",
+			AgentConfig: []byte(`{"turns":[{"tool_calls":[{"name":"charge_card"}]},{"content":"done"}],"tools":{"charge_card":{"idempotent":true}}}`),
+			Inputs:      []*proto.Step{harnesstest.UserStep("go")},
+		}, nil)
+	}()
+	<-done
+	// A was killed holding its lease: take it as A, never renewing.
+	dead, err := r.leases.Acquire(ctx, r.conv, r.c.ownerID, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recovered.Store(true)
+	reconcile(t, b)
+	reconcile(t, c)
+	r.waitState(t, proto.State_STATE_COMPLETED)
+	r.checkOneTerminalState(t)
+
+	calls, err := r.ledger.Calls(ctx, r.conv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	call := calls[0]
+	if call.State != toolledger.Succeeded || call.Attempts != 2 || len(r.effects.Effects) != 1 || call.Generation <= dead.Generation() {
+		t.Fatalf("call = %s attempts %d generation %d effects %d; want SUCCEEDED, 2 attempts above generation %d, 1 effect",
+			call.State, call.Attempts, call.Generation, len(r.effects.Effects), dead.Generation())
+	}
+
+	stale := newLogger(r.log, r.conv, "")
+	stale.gen = dead.Generation()
+	if _, err := stale.LogOutputs(ctx, nil, proto.State_STATE_FAILED); !errors.Is(err, lease.ErrFenced) {
+		t.Fatalf("stale append: err = %v, want ErrFenced", err)
+	}
+	if err := r.ledger.MarkUnknown(ctx, dead.Generation(), call.CallID, "stale"); !errors.Is(err, lease.ErrFenced) {
+		t.Fatalf("stale ledger write: err = %v, want ErrFenced", err)
+	}
+	r.checkOneTerminalState(t)
+}
+
+// M7 DoD: a rolling update. A is mid-tool-call when it is told to stop: its
+// run is canceled, as srv.Stop does after the drain timeout, and it releases
+// its lease on the way out. B takes the run over without waiting for the
+// lease ttl and completes it; the log has one terminal state.
+func TestReplicas_RollingUpdateHandsOverOnce(t *testing.T) {
+	r := newRecRig(t, func(reg *Registry, effects *fake.MemoryEffects) {
+		if err := reg.Register("fake", fake.New(effects), RecoveryFull); err != nil {
+			t.Fatal(err)
+		}
+		reg.DeclareTools("fake", map[string]toolledger.Class{"charge_card": toolledger.Idempotent})
+	})
+	b := r.controller(t, "replica-b")
+	ctx, stop := context.WithCancel(context.Background())
+	done := make(chan error)
+	go func() {
+		done <- r.c.Exec(ctx, &proto.CreateInteractionEvent{
+			ConversationId: r.conv, AgentId: "fake",
+			AgentConfig: []byte(`{"turns":[{"tool_calls":[{"name":"charge_card"}]},{"content":"done"}],"tools":{"charge_card":{"idempotent":true,"delay_ms":1000}}}`),
+			Inputs:      []*proto.Step{harnesstest.UserStep("go")},
+		}, nil)
+	}()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		calls, err := r.ledger.Calls(context.Background(), r.conv)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(calls) == 1 && calls[0].State == toolledger.Started {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the call never started")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	stop()
+	if err := <-done; err == nil {
+		t.Fatal("canceled run returned no error")
+	}
+	handover := time.Now()
+	reconcile(t, b)
+	r.waitState(t, proto.State_STATE_COMPLETED)
+	if took := time.Since(handover); took > 2*time.Second+time.Second {
+		t.Errorf("handover took %v; a released lease should not wait out the 2s ttl", took)
+	}
+	r.checkOneTerminalState(t)
+	calls, _ := r.ledger.Calls(context.Background(), r.conv)
+	if calls[0].State != toolledger.Succeeded || calls[0].Attempts != 2 || len(r.effects.Effects) != 1 {
+		t.Fatalf("call = %s attempts %d effects %d, want SUCCEEDED after 2 with 1 effect", calls[0].State, calls[0].Attempts, len(r.effects.Effects))
 	}
 }

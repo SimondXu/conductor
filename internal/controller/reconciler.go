@@ -117,7 +117,7 @@ func (d *Controller) reconcileOnce(ctx context.Context, runs eventlog.RunIndex, 
 func (d *Controller) recoverOne(ctx context.Context, runs eventlog.RunIndex, c eventlog.Candidate, maxAttempts int) {
 	id := c.ConversationID
 	lctx := telemetry.WithLogAttrs(ctx, slog.String("conversation_id", id))
-	if c.AgentID != "" && d.registry.Recovery(c.AgentID) != RecoveryFull {
+	if d.registry.Recovery(c.AgentID) != RecoveryFull {
 		// The harness runs its own tool loop: Conductor cannot rebuild it
 		// (correctness.md §0.3). Count it, then leave it alone for an hour.
 		recoverySkipped.WithLabelValues("harness_not_recoverable").Inc()
@@ -182,7 +182,9 @@ func (d *Controller) poison(ctx context.Context, id string) error {
 			}
 		}
 	}
-	if _, err := newLogger(d.eventLog, id, "").LogOutputs(ctx, nil, proto.State_STATE_FAILED); err != nil {
+	l := newLogger(d.eventLog, id, "")
+	l.gen = gen
+	if _, err := l.LogOutputs(ctx, nil, proto.State_STATE_FAILED); err != nil {
 		return err
 	}
 	recoveryPoisoned.Inc()

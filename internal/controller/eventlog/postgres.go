@@ -64,5 +64,5 @@ func OpenPostgresEventLog(dsn string) (EventLog, error) {
 			version, dirty, schema.SchemaVersion)
 	}
 
-	return &Postgres{&sqlEventLog{db: db, projectRuns: true}}, nil
+	return &Postgres{&sqlEventLog{db: db, postgres: true}}, nil
 }

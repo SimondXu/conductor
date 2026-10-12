@@ -106,13 +106,19 @@ func (s *Server) Serve(address string, opts ...grpc.ServerOption) error {
 }
 
 // GracefulStop stops the gRPC server gracefully.
+// It does not close the controller: runs still unwinding need its database
+// connections to log and release their leases. The caller closes it.
 func (s *Server) GracefulStop() {
 	slog.Info("Stopping server gracefully...")
-	if s.controller != nil {
-		s.controller.Close()
-	}
 	if s.grpcServer != nil {
 		s.grpcServer.GracefulStop()
+	}
+}
+
+// Stop closes every connection and cancels the RPCs in flight.
+func (s *Server) Stop() {
+	if s.grpcServer != nil {
+		s.grpcServer.Stop()
 	}
 }
 

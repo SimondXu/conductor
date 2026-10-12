@@ -23,6 +23,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/simondxu/conductor/cmd/conductor/internal/cliutil"
 	"github.com/simondxu/conductor/internal/controller"
@@ -34,8 +35,9 @@ import (
 )
 
 var (
-	serveConfigFile  string
-	serveMetricsAddr string
+	serveConfigFile   string
+	serveMetricsAddr  string
+	serveDrainTimeout time.Duration
 )
 
 var serveCmd = &cobra.Command{
@@ -49,6 +51,7 @@ Loads configuration from a YAML file (default: conductor.yaml; ax.yaml is still 
 func init() {
 	serveCmd.Flags().StringVar(&serveConfigFile, "config", defaultConfigFile, "Path to YAML configuration file")
 	serveCmd.Flags().StringVar(&serveMetricsAddr, "metrics-addr", ":9090", "Address for the Prometheus /metrics endpoint; empty disables it")
+	serveCmd.Flags().DurationVar(&serveDrainTimeout, "drain-timeout", 20*time.Second, "On SIGTERM, how long runs in flight may finish before they are canceled and their leases released")
 }
 
 func runServe(cmd *cobra.Command, args []string) error {
@@ -97,6 +100,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("error creating controller: %w", err)
 	}
 	defer c.Close()
+	defer c.Wait() // every Exec has released its lease before the pools close
 
 	if serveMetricsAddr != "" {
 		mux := http.NewServeMux()
@@ -138,10 +142,25 @@ func runServe(cmd *cobra.Command, args []string) error {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
+	// On SIGTERM the reconciler stops first, then runs in flight get the
+	// drain timeout to finish. Whatever is still running is then canceled.
+	// Every Exec releases its lease on the way out, so another replica takes
+	// the run over at once instead of after the lease ttl (PRD.md §6.2).
 	go func() {
 		<-sigChan
-		slog.InfoContext(ctx, "Received interrupt, shutting down...")
-		srv.GracefulStop()
+		slog.InfoContext(ctx, "Received interrupt, draining", slog.Duration("drain_timeout", serveDrainTimeout))
+		stopReconciler()
+		stopped := make(chan struct{})
+		go func() {
+			srv.GracefulStop()
+			close(stopped)
+		}()
+		select {
+		case <-stopped:
+		case <-time.After(serveDrainTimeout):
+			slog.WarnContext(ctx, "Drain timeout: canceling runs in flight; their leases are released")
+			srv.Stop()
+		}
 	}()
 	slog.InfoContext(ctx, "Starting Conductor server", slog.String("address", cfg.Server.Address))
 	if err := srv.Serve(cfg.Server.Address); err != nil {

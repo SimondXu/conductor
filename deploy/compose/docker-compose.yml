@@ -29,6 +29,19 @@ x-conductor-image: &conductor-image
 x-dsn: &dsn
   CONDUCTOR_DSN: postgres://conductor:conductor@postgres:5432/conductor?sslmode=disable
 
+# Three controller replicas share the database (PRD M7). Only the first
+# publishes a host port; the others take over runs whose owner dies.
+x-conductor-replica: &conductor-replica
+  <<: *conductor-image
+  environment: *dsn
+  working_dir: /etc/conductor
+  volumes:
+    - ./conductor.yaml:/etc/conductor/conductor.yaml:ro
+  healthcheck:
+    test: ["CMD", "curl", "-sf", "http://localhost:9090/metrics"]
+    interval: 2s
+    retries: 30
+
 services:
   postgres:
     image: postgres:17
@@ -53,20 +66,25 @@ services:
       postgres: {condition: service_healthy}
 
   conductor:
-    <<: *conductor-image
-    environment: *dsn
-    working_dir: /etc/conductor
-    volumes:
-      - ./conductor.yaml:/etc/conductor/conductor.yaml:ro
-    command: ["sh", "-c", "conductor migrate up && exec conductor serve"]
+    <<: *conductor-replica
+    # A short drain, so smoke.sh can watch a SIGTERM hand a run over.
+    command: ["sh", "-c", "conductor migrate up && exec conductor serve --drain-timeout 2s"]
     ports: ["${CONDUCTOR_PORT:-8494}:8494"]
-    healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:9090/metrics"]
-      interval: 2s
-      retries: 30
     depends_on:
       postgres: {condition: service_healthy}
       fake-harness: {condition: service_started}
+
+  conductor-2:
+    <<: *conductor-replica
+    command: ["conductor", "serve", "--drain-timeout", "2s"]
+    depends_on:
+      conductor: {condition: service_healthy}
+
+  conductor-3:
+    <<: *conductor-replica
+    command: ["conductor", "serve", "--drain-timeout", "2s"]
+    depends_on:
+      conductor: {condition: service_healthy}
 
   prometheus:
     image: prom/prometheus:v3.5.0

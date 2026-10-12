@@ -199,7 +199,9 @@ SELECT conversation_id, step, generation, prev_generation
 
 **Falsified by** `TestFencedAppendRejectsStaleGeneration` — acquire, bump
 generation from a second owner, then append with the first owner's generation
-and require an error.
+and require an error — and `TestFencedTransitionsRejectStaleGeneration` for
+the ledger. `TestReplicas_KillHolderTransfersOwnership` does both from the
+dead holder of a real takeover.
 
 Under chaos the positive evidence is
 `conductor_fenced_writes_rejected_total > 0`: if it is always zero during
