@@ -62,6 +62,12 @@ func (d *Controller) RunReconciler(ctx context.Context, cfg ReconcilerConfig) er
 	if cfg.MaxAttempts == 0 {
 		cfg.MaxAttempts = 5
 	}
+	// A handover starts a pass at once, so a run released unfinished is
+	// taken over without waiting out the interval.
+	var handovers <-chan struct{}
+	if h, ok := d.lease.(handoverer); ok {
+		handovers = h.Handovers(ctx)
+	}
 	for {
 		if err := d.reconcileOnce(ctx, runs, cfg); err != nil && ctx.Err() == nil {
 			slog.WarnContext(ctx, "Reconciler pass failed", slog.Any("error", err))
@@ -69,6 +75,7 @@ func (d *Controller) RunReconciler(ctx context.Context, cfg ReconcilerConfig) er
 		select {
 		case <-ctx.Done():
 			return nil
+		case <-handovers:
 		case <-time.After(cfg.Interval + rand.N(cfg.Interval/5+1)):
 		}
 	}
@@ -154,8 +161,17 @@ func (d *Controller) recoverOne(ctx context.Context, runs eventlog.RunIndex, c e
 		d.recordLastRecovery(ctx, id, stall)
 	case errors.Is(err, lease.ErrHeld):
 		result = "held"
+	case ctx.Err() != nil:
+		result = "canceled" // this replica is shutting down
 	default:
 		result = "failure"
+	}
+	if result == "held" || result == "canceled" {
+		// Not a try at the run: a takeover by the next owner must not wait
+		// for this attempt's backoff.
+		if err := runs.RefundRecoveryAttempt(context.WithoutCancel(ctx), id); err != nil {
+			slog.WarnContext(lctx, "Recovery attempt not refunded", slog.Any("error", err))
+		}
 	}
 	recoveryTotal.WithLabelValues(result).Inc()
 	slog.InfoContext(lctx, "recovery.complete", slog.String("result", result), slog.Int("attempt", n),

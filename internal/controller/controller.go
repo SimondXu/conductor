@@ -268,6 +268,7 @@ func (d *Controller) own(ctx context.Context, conversationID string) (context.Co
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	parent := ctx
 	ctx, cancel := context.WithCancel(ctx)
 	go func() {
 		select {
@@ -279,10 +280,28 @@ func (d *Controller) own(ctx context.Context, conversationID string) (context.Co
 	go lease.KeepAlive(ctx, held, d.leaseTTL/3)
 	return ctx, held, func() {
 		cancel()
-		if err := held.Release(context.WithoutCancel(ctx)); err != nil && !errors.Is(err, lease.ErrLost) {
-			slog.WarnContext(ctx, "Failed to release the conversation lease", slog.Any("error", err))
+		rctx := context.WithoutCancel(ctx)
+		if err := held.Release(rctx); err != nil {
+			if !errors.Is(err, lease.ErrLost) {
+				slog.WarnContext(ctx, "Failed to release the conversation lease", slog.Any("error", err))
+			}
+			return
+		}
+		// The caller went away (a drain, a client disconnect) mid-run: let
+		// another replica take the run over now.
+		if h, ok := d.lease.(handoverer); ok && parent.Err() != nil {
+			if err := h.Handover(rctx, conversationID); err != nil {
+				slog.WarnContext(ctx, "Failed to announce the handover", slog.Any("error", err))
+			}
 		}
 	}, nil
+}
+
+// handoverer is a Lease that can announce a run released unfinished
+// (lease.Postgres).
+type handoverer interface {
+	Handover(ctx context.Context, conversationID string) error
+	Handovers(ctx context.Context) <-chan struct{}
 }
 
 // generation is the fencing token of held, 0 without a lease.
