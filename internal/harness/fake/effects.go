@@ -32,9 +32,11 @@ type Effect struct {
 }
 
 // EffectSink records effects. Record returns how many effects now exist for
-// the effect's idempotency key, including this one.
+// the effect's idempotency key, including this one; Count returns how many
+// exist already.
 type EffectSink interface {
 	Record(ctx context.Context, e Effect) (attempt int, err error)
+	Count(ctx context.Context, idempotencyKey string) (int, error)
 }
 
 // MemoryEffects is an in-process EffectSink.
@@ -51,6 +53,19 @@ func (m *MemoryEffects) Record(_ context.Context, e Effect) (int, error) {
 	n := 0
 	for _, x := range m.Effects {
 		if x.IdempotencyKey == e.IdempotencyKey {
+			n++
+		}
+	}
+	return n, nil
+}
+
+// Count implements EffectSink.
+func (m *MemoryEffects) Count(_ context.Context, key string) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	n := 0
+	for _, x := range m.Effects {
+		if x.IdempotencyKey == key {
 			n++
 		}
 	}
@@ -103,6 +118,16 @@ func (p *PostgresEffects) Record(ctx context.Context, e Effect) (int, error) {
 		return 0, fmt.Errorf("fake_effects: count: %w", err)
 	}
 	return n, tx.Commit()
+}
+
+// Count implements EffectSink.
+func (p *PostgresEffects) Count(ctx context.Context, key string) (int, error) {
+	var n int
+	if err := p.db.QueryRowContext(ctx,
+		"SELECT count(*) FROM fake_effects WHERE idempotency_key = $1", key).Scan(&n); err != nil {
+		return 0, fmt.Errorf("fake_effects: count: %w", err)
+	}
+	return n, nil
 }
 
 // Close closes the database connection.

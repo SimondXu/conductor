@@ -97,10 +97,15 @@ func (d *Controller) exec(ctx context.Context, req *proto.CreateInteractionEvent
 	// TODO(anj): We need to consolidate agents and harness registration.
 	// Adding harness registration support temporarily.
 	l := newLogger(d.eventLog, req.ConversationId, req.AgentId)
-	state, storedHarnessID, history, err := l.ResumptionState(ctx)
+	events, err := d.eventLog.Events(ctx, req.ConversationId)
 	if err != nil {
 		return fmt.Errorf("failed to check resumption state: %w", err)
 	}
+	st, err := rebuild(events)
+	if err != nil {
+		return fmt.Errorf("failed to rebuild conversation %q: %w", req.ConversationId, err)
+	}
+	state, storedHarnessID := st.State, st.HarnessID
 
 	// On resume, use the conversation's recorded harness. Using a different harness
 	// for the same conversation is not allowed.
@@ -124,7 +129,7 @@ func (d *Controller) exec(ctx context.Context, req *proto.CreateInteractionEvent
 	}
 
 	if d.registry.Recovery(harnessID) == RecoveryFull {
-		return d.execOwnedLoop(ctx, req, l, harnessID, h, state, history, handler)
+		return d.execOwnedLoop(ctx, req, l, harnessID, h, st, handler)
 	}
 
 	hhandler := &harnessHandler{
@@ -179,6 +184,14 @@ type harnessHandler struct {
 }
 
 func (a *harnessHandler) OnMessage(ctx context.Context, execID string, step *proto.Step) error {
+	if err := a.log(ctx, step); err != nil {
+		return err
+	}
+	return a.deliver(step)
+}
+
+// log appends step to the conversation log.
+func (a *harnessHandler) log(ctx context.Context, step *proto.Step) error {
 	// Log every response received from the harness
 	// TODO(anj): The harness should send the full input sent to get this particular response.
 	logStep, err := a.logger.LogOutputs(ctx, []*proto.Step{step}, proto.State_STATE_PENDING)
@@ -190,7 +203,11 @@ func (a *harnessHandler) OnMessage(ctx context.Context, execID string, step *pro
 	if step != nil {
 		step.Index = logStep
 	}
+	return nil
+}
 
+// deliver sends a logged step to the client.
+func (a *harnessHandler) deliver(step *proto.Step) error {
 	if a.execHandler == nil {
 		return nil
 	}
@@ -224,14 +241,42 @@ const ownerGeneration = 0
 // each call is recorded around its execution: PLANNED after the model turn
 // that requested it, STARTED before the tool turn that runs it, then settled
 // from its result, or OUTCOME_UNKNOWN when that turn ends without one.
-func (d *Controller) execOwnedLoop(ctx context.Context, req *proto.CreateInteractionEvent, l *logger, harnessID string, h harness.Harness, state proto.State, history []*proto.Step, handler ExecHandler) error {
-	if len(req.Inputs) == 0 && state != proto.State_STATE_PENDING {
+//
+// A resumed run continues from the history in the log, with the logged
+// agent_config unless the request brings one. Calls it left unanswered are
+// first resolved from the ledger by recoverCalls.
+func (d *Controller) execOwnedLoop(ctx context.Context, req *proto.CreateInteractionEvent, l *logger, harnessID string, h harness.Harness, st runState, handler ExecHandler) error {
+	if len(req.Inputs) == 0 && st.State != proto.State_STATE_PENDING {
 		return nil
 	}
-	// Re-running a tool without the reconciler could repeat an UNSAFE effect,
-	// so an unanswered call is left for the reconciler (M4) instead.
+	history := st.History
 	if calls := harness.UnansweredToolCalls(history); len(calls) > 0 {
-		return fmt.Errorf("conversation %q has %d unanswered tool call(s); resuming it needs the reconciler", req.ConversationId, len(calls))
+		// Without the ledger nothing says whether a call had its effect, and
+		// re-running it could repeat an UNSAFE one.
+		if d.ledger == nil {
+			return fmt.Errorf("conversation %q has %d unanswered tool call(s); resuming it needs the tool ledger (PostgreSQL)", req.ConversationId, len(calls))
+		}
+		if len(req.Inputs) > 0 {
+			return fmt.Errorf("conversation %q has an unfinished run; resume it before sending new input", req.ConversationId)
+		}
+	}
+	if d.ledger != nil && st.State == proto.State_STATE_PENDING {
+		failed, err := d.recoverCalls(ctx, req.ConversationId, harnessID, history)
+		if err != nil {
+			return err
+		}
+		if len(failed) > 0 {
+			// The error results and FAILED go in one event, so the run cannot
+			// be left answered but still PENDING.
+			if _, err := l.LogOutputs(ctx, failed, proto.State_STATE_FAILED); err != nil {
+				return fmt.Errorf("failed to log the failed run: %w", err)
+			}
+			return errors.New("run failed: a tool call's outcome is unknown and it cannot be safely re-run")
+		}
+	}
+	agentConfig := req.AgentConfig
+	if len(agentConfig) == 0 {
+		agentConfig = st.AgentConfig
 	}
 
 	if len(req.Inputs) > 0 {
@@ -241,7 +286,7 @@ func (d *Controller) execOwnedLoop(ctx context.Context, req *proto.CreateInterac
 		history = append(history, req.Inputs...)
 	}
 
-	exec, err := h.Start(ctx, req.ConversationId, req.AgentConfig)
+	exec, err := h.Start(ctx, req.ConversationId, agentConfig)
 	if err != nil {
 		return fmt.Errorf("failed to start harness session: %w", err)
 	}
@@ -369,20 +414,20 @@ type turnHandler struct {
 
 func (t *turnHandler) OnMessage(ctx context.Context, execID string, step *proto.Step) error {
 	if call := step.GetToolCall(); call != nil {
-		fc := call.GetFunctionCall()
-		hash, canonical, err := toolledger.ArgsHash(fc.GetArguments())
+		p, err := plannedCall(t.conversationID, int64(t.base+len(t.emitted)), call)
 		if err != nil {
 			return err
 		}
-		pos := int64(t.base + len(t.emitted))
-		call.Id = toolledger.CallID(t.conversationID, pos, fc.GetName(), hash)
-		t.planned = append(t.planned, toolledger.PlannedCall{
-			CallID: call.Id, ConversationID: t.conversationID, Step: pos,
-			ToolName: fc.GetName(), ArgsHash: hash, Args: canonical,
-		})
+		call.Id = p.CallID
+		t.planned = append(t.planned, p)
 	}
+	if err := t.log(ctx, step); err != nil {
+		return err
+	}
+	// Only a logged step is part of the history; a result that never reached
+	// the log must not settle its call (I7b).
 	t.emitted = append(t.emitted, step)
-	return t.harnessHandler.OnMessage(ctx, execID, step)
+	return t.deliver(step)
 }
 
 func (t *turnHandler) OnComplete(ctx context.Context, execID string) error { return nil }
@@ -424,29 +469,6 @@ func newLogger(
 		conversationID: conversationID,
 		harnessID:      harnessID,
 	}
-}
-
-// ResumptionState returns the conversation's current state, the harness it
-// used, and every step logged so far, in order.
-func (l *logger) ResumptionState(ctx context.Context) (proto.State, string, []*proto.Step, error) {
-	events, err := l.el.Events(ctx, l.conversationID)
-	if err != nil {
-		return proto.State_STATE_UNSPECIFIED, "", nil, err
-	}
-
-	var state proto.State
-	var harnessID string
-	var steps []*proto.Step
-	for _, ev := range events {
-		if harnessID == "" && ev.AgentId != "" {
-			harnessID = ev.AgentId
-		}
-		if ev.State != proto.State_STATE_UNSPECIFIED {
-			state = ev.State
-		}
-		steps = append(steps, ev.Steps...)
-	}
-	return state, harnessID, steps, nil
 }
 
 func (l *logger) LogInputs(ctx context.Context, steps []*proto.Step, agentConfig []byte) (int64, error) {

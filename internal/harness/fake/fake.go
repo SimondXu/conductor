@@ -75,6 +75,12 @@ type Tool struct {
 	CrashAfterEffect bool `json:"crash_after_effect,omitempty"`
 	// DuplicateResult reports the result twice.
 	DuplicateResult bool `json:"duplicate_result,omitempty"`
+	// Idempotent makes the tool honour its idempotency key, as an idempotent
+	// external API does: a repeat with a key that already had its effect
+	// performs no new one. It models the external system, not the class
+	// Conductor declares, so a tool declared IDEMPOTENT without it shows up
+	// as a duplicate effect (I2).
+	Idempotent bool `json:"idempotent,omitempty"`
 }
 
 // DefaultScript thinks, calls charge_card, calls send_email, then answers.
@@ -84,6 +90,7 @@ var DefaultScript = Script{
 		{ToolCalls: []ToolCall{{Name: "send_email", Args: map[string]any{"to": "user@example.com"}}}},
 		{Content: "Charged and emailed."},
 	},
+	Tools: map[string]Tool{"charge_card": {Idempotent: true}},
 }
 
 // DefaultScriptTools are the recovery classes of DefaultScript's tools.
@@ -237,17 +244,26 @@ func (e *execution) toolTurn(ctx context.Context, handler harness.Handler, calls
 		if err != nil {
 			return fmt.Errorf("fake: tool %q args: %w", name, err)
 		}
-		attempt, err := e.h.effects.Record(ctx, Effect{
-			CallID:         call.GetId(),
-			IdempotencyKey: call.GetId(),
-			ToolName:       name,
-			Payload:        payload,
-		})
-		if err != nil {
-			return fmt.Errorf("fake: recording effect of %q: %w", name, err)
+		// attempt is how many effects exist for the key once this call is done.
+		attempt := 0
+		if tool.Idempotent {
+			if attempt, err = e.h.effects.Count(ctx, call.GetId()); err != nil {
+				return fmt.Errorf("fake: counting effects of %q: %w", name, err)
+			}
 		}
-		if tool.CrashAfterEffect && attempt == 1 {
-			e.h.exit(CrashExitCode)
+		if attempt == 0 {
+			attempt, err = e.h.effects.Record(ctx, Effect{
+				CallID:         call.GetId(),
+				IdempotencyKey: call.GetId(),
+				ToolName:       name,
+				Payload:        payload,
+			})
+			if err != nil {
+				return fmt.Errorf("fake: recording effect of %q: %w", name, err)
+			}
+			if tool.CrashAfterEffect && attempt == 1 {
+				e.h.exit(CrashExitCode)
+			}
 		}
 
 		result, err := structpb.NewStruct(map[string]any{"status": "ok", "attempt": attempt})
