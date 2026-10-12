@@ -475,7 +475,9 @@ documented as unsupported; Apache-2.0 attribution is unaffected.
      recovers and completes) with `runtime_class: gvisor`.
   4. Before deleting the pod, requires that it has `runtimeClassName:
      gvisor` and that its kernel is gVisor's, by its `dmesg` or its fixed
-     `/proc/version`.
+     `/proc/version`. In CI with release-20260928.0, `/proc/version` read
+     `Linux version 4.19.0-gvisor #1 SMP Sun Jan 10 15:06:54 PST 2016`, and
+     the run recovered at generation 2 after the pod was deleted.
 - **Where it is checked.** The CI job `pod-executor-gvisor` runs the e2e.
 - **What isolation means here.** It is the runtime's, not Conductor's: a
   tool still runs with the harness's privileges, inside the sandbox
