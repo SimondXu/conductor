@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -121,6 +122,49 @@ func TestValidate_InteractionsValid(t *testing.T) {
 	}
 	if err := c.Validate(); err != nil {
 		t.Fatalf("Validate() = %v, want nil", err)
+	}
+}
+
+func TestParse_OpenAICompat(t *testing.T) {
+	cfg, err := LoadFromBytes([]byte(`
+registry:
+  openai-compat:
+    default: true
+    base_url: http://localhost:11434/v1
+    model: qwen3:8b
+    api_key_env: OPENAI_API_KEY
+    request_timeout: 30s
+    extra_headers:
+      X-Route: ROUTE_ENV
+    tools:
+      - name: get_weather
+        class: IDEMPOTENT
+        description: Weather for a city.
+        url: http://tools.local/weather
+        parameters:
+          type: object
+          properties:
+            city: {type: string}
+`))
+	if err != nil {
+		t.Fatalf("LoadFromBytes: %v", err)
+	}
+	oc := cfg.Registry.OpenAICompat
+	if !oc.Default || oc.Model != "qwen3:8b" || oc.RequestTimeout != 30*time.Second || oc.ExtraHeaders["X-Route"] != "ROUTE_ENV" {
+		t.Errorf("openai-compat = %+v", oc)
+	}
+	props, _ := oc.Tools[0].Parameters["properties"].(map[string]any)
+	if oc.Tools[0].URL != "http://tools.local/weather" || props["city"] == nil {
+		t.Errorf("tool = %+v", oc.Tools[0])
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() = %v", err)
+	}
+
+	oc.Tools[0].URL = ""
+	cfg.Registry.OpenAICompat = oc
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "url is required") {
+		t.Fatalf("Validate() = %v, want url-required error", err)
 	}
 }
 

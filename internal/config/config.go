@@ -23,6 +23,7 @@ import (
 
 	"github.com/simondxu/conductor/internal/controller/toolledger"
 	"github.com/simondxu/conductor/internal/harness"
+	"github.com/simondxu/conductor/internal/harness/openaicompat"
 	"github.com/simondxu/conductor/internal/harness/substrate"
 	"gopkg.in/yaml.v3"
 )
@@ -37,6 +38,7 @@ const (
 	AntigravityHarnessID             = "antigravity"
 	AntigravityInteractionsHarnessID = "antigravity-interactions"
 	FakeHarnessID                    = "fake"
+	OpenAICompatHarnessID            = "openai-compat"
 	// AntigravityHarnessTemplate is the substrate ActorTemplate that runs the
 	// Antigravity harness.
 	AntigravityHarnessTemplate = "conductor-harness-antigravity-template"
@@ -102,6 +104,14 @@ type RegistryConfig struct {
 	AntigravityInteractions AntigravityInteractionsHarnessConfig `yaml:"antigravity-interactions,omitempty"`
 	Substrate               []SubstrateHarnessConfig             `yaml:"substrate,omitempty"`
 	Fake                    FakeHarnessConfig                    `yaml:"fake,omitempty"`
+	OpenAICompat            OpenAICompatHarnessConfig            `yaml:"openai-compat,omitempty"`
+}
+
+// OpenAICompatHarnessConfig registers the OpenAI-compatible harness
+// (docs/conductor/PRD.md §3.2). It is registered only when base_url is set.
+type OpenAICompatHarnessConfig struct {
+	Default             bool `yaml:"default,omitempty"`
+	openaicompat.Config `yaml:",inline"`
 }
 
 // FakeHarnessConfig registers the deterministic fake harness. It is always
@@ -366,12 +376,15 @@ func (c *Config) Validate() error {
 	if c.Registry.Fake.Default {
 		defaultCount++
 	}
+	if c.Registry.OpenAICompat.Default {
+		defaultCount++
+	}
 
 	for _, sc := range c.Registry.Substrate {
 		if sc.ID == "" {
 			return fmt.Errorf("substrate harness id is required")
 		}
-		if sc.ID == AntigravityHarnessID || sc.ID == AntigravityInteractionsHarnessID || sc.ID == FakeHarnessID {
+		if sc.ID == AntigravityHarnessID || sc.ID == AntigravityInteractionsHarnessID || sc.ID == FakeHarnessID || sc.ID == OpenAICompatHarnessID {
 			return fmt.Errorf("substrate harness id %q is reserved for built-in harnesses", sc.ID)
 		}
 		if sc.Namespace == "" {
@@ -397,6 +410,10 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	if err := c.Registry.OpenAICompat.validate(); err != nil {
+		return err
+	}
+
 	if defaultCount > 1 {
 		return fmt.Errorf("multiple harnesses marked as default")
 	}
@@ -405,6 +422,43 @@ func (c *Config) Validate() error {
 		return err
 	}
 
+	return nil
+}
+
+func (oc OpenAICompatHarnessConfig) validate() error {
+	if oc.BaseURL == "" {
+		if oc.Default || oc.Model != "" || len(oc.Tools) > 0 {
+			return fmt.Errorf("registry.openai-compat: base_url is required")
+		}
+		return nil
+	}
+	if oc.Model == "" {
+		return fmt.Errorf("registry.openai-compat: model is required")
+	}
+	switch oc.ToolChoice {
+	case "", "auto", "none", "required":
+	default:
+		return fmt.Errorf("registry.openai-compat: tool_choice %q is not auto, none or required", oc.ToolChoice)
+	}
+	if oc.RequestTimeout < 0 || oc.MaxTurns < 0 {
+		return fmt.Errorf("registry.openai-compat: request_timeout and max_turns must not be negative")
+	}
+	seen := map[string]bool{}
+	for _, t := range oc.Tools {
+		if t.Name == "" {
+			return fmt.Errorf("registry.openai-compat.tools: name is required")
+		}
+		if seen[t.Name] {
+			return fmt.Errorf("registry.openai-compat.tools %q: declared twice", t.Name)
+		}
+		seen[t.Name] = true
+		if _, err := toolledger.ParseClass(t.Class); err != nil {
+			return fmt.Errorf("registry.openai-compat.tools %q: %w", t.Name, err)
+		}
+		if t.URL == "" {
+			return fmt.Errorf("registry.openai-compat.tools %q: url is required", t.Name)
+		}
+	}
 	return nil
 }
 
