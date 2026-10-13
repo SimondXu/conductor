@@ -173,6 +173,13 @@ func newRig(t *testing.T) *rig {
 	})
 	ts := httptest.NewServer(r.tools)
 	t.Cleanup(ts.Close)
+	// CONDUCTOR_E2E_EFFORT sets output_config.effort: a real model at a
+	// low effort may not think at all, and then no thinking block is sent
+	// back for the API to check.
+	effort := ""
+	if e := os.Getenv("CONDUCTOR_E2E_EFFORT"); e != "" {
+		effort = "    effort: " + e + "\n"
+	}
 	for _, name := range []string{"a", "b"} {
 		r.addr[name] = freeAddr(t)
 		path := filepath.Join(r.dir, name+".yaml")
@@ -192,7 +199,7 @@ registry:
     base_url: %s
     max_tokens: 4000
     request_timeout: 60s
-%s`, r.addr[name], modelID, modelBase, toolConfig(ts.URL))
+%s%s`, r.addr[name], modelID, modelBase, effort, toolConfig(ts.URL))
 		if err := os.WriteFile(path, []byte(cfg), 0o600); err != nil {
 			t.Fatal(err)
 		}

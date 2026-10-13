@@ -109,6 +109,24 @@ API through the `anthropic` harness. It reads `ANTHROPIC_API_KEY` and uses
 - A real model chooses its own calls, so a scenario can fail because the model
   did something other than the task, for example two calls in one turn. Read
   the log before calling that a Conductor bug.
+- **Set `CONDUCTOR_E2E_EFFORT=max`.** `CONDUCTOR_E2E_EFFORT` sets the
+  harness's `effort`. On this task Haiku 5.5 does not think at its default
+  effort or at `high`, so no thinking block goes back to the API and the
+  signature check is never exercised. At `max` it thinks on most turns.
+
+**Last real run (2026-10-12).** `claude-haiku-5-5` at effort `max`, commit
+`5f9837f`. Every scenario that runs with a real model passed; the scripted
+ones skipped. The meter counted 105 requests and 0 errors, and these tokens:
+
+| Input | Output | Cache read | Cache write |
+|---|---|---|---|
+| 264 | 20,612 | 93,789 | 19,504 |
+
+At $0.10 / $0.50 per million input / output tokens, with cache reads at 0.1x
+and 5-minute cache writes at 1.25x the input price, that is about $0.014. The
+24 runs logged 61 thinking blocks, each with its signature. Every one was sent
+back on a later request and the API accepted it, including after crash
+recovery, takeover, a double fault, and across user turns.
 
 **Budget.** All model traffic goes through a meter in the test.
 
