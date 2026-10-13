@@ -111,3 +111,46 @@ wait "$client" || true # the client sees the harness go away
 until_eq 120 "SELECT state FROM runs WHERE conversation_id = '$conv'" "COMPLETED"
 call=$(psql "SELECT state || ' ' || attempts || ' gen ' || generation FROM tool_calls WHERE conversation_id = '$conv'")
 echo "PASS: $conv completed after its harness pod ($pod) was deleted mid-tool-call; call: $call"
+
+# Rolling update (M7 DoD, on Kubernetes): two controller replicas, a run of
+# six slow IDEMPOTENT tool turns, and `kubectl rollout restart` while it is
+# in flight. Each old pod drains (SIGTERM, then the drain timeout), cancels
+# the run and releases its lease; another replica takes it over. The run
+# must complete once, every call once in effect, at a higher generation,
+# with every controller pod replaced.
+k scale deploy/conductor --replicas 2
+k rollout status deploy/conductor --timeout 180s
+before=$(k get pods -l app=conductor -o jsonpath='{.items[*].metadata.name}')
+conv="rolling-update-$(date +%s)"
+turn='{"tool_calls":[{"name":"charge_card","args":{"n":N}}]}'
+turns=$(for n in 1 2 3 4 5 6; do printf '%s,' "${turn/N/$n}"; done)
+cfg="{\"turns\":[${turns}{\"content\":\"Charged six times.\"}],\"tools\":{\"charge_card\":{\"idempotent\":true,\"delay_ms\":8000}}}"
+k exec deploy/conductor -- conductor run --server localhost:8494 --conversation "$conv" \
+  --agent-config "$cfg" --input "charge me six times" >/dev/null 2>&1 &
+client=$!
+until_eq 120 "SELECT count(*) FROM tool_calls WHERE conversation_id = '$conv' AND state = 'STARTED'" "1"
+k rollout restart deploy/conductor
+k rollout status deploy/conductor --timeout 300s
+wait "$client" || true # the client's pod is one of those replaced
+
+until_eq 300 "SELECT state FROM runs WHERE conversation_id = '$conv'" "COMPLETED"
+after=$(k get pods -l app=conductor --field-selector status.phase=Running -o jsonpath='{.items[*].metadata.name}')
+for p in $before; do
+  [[ " $after " != *" $p "* ]] || fail "pod $p survived the rolling update"
+done
+terminal=$(psql "SELECT count(*) FROM conversation_log WHERE conversation_id = '$conv'
+                   AND payload::jsonb->>'state' IN ('STATE_COMPLETED', 'STATE_FAILED', 'STATE_CANCELED')")
+[[ "$terminal" == "1" ]] || fail "$conv has $terminal terminal events, want 1"
+calls=$(psql "SELECT count(*) FILTER (WHERE state = 'SUCCEEDED') || '/' || count(*) FROM tool_calls WHERE conversation_id = '$conv'")
+[[ "$calls" == "6/6" ]] || fail "$conv: $calls calls SUCCEEDED, want 6/6"
+effects=$(psql "SELECT count(*) FROM fake_effects e JOIN tool_calls t USING (call_id) WHERE t.conversation_id = '$conv'")
+[[ "$effects" == "6" ]] || fail "$conv has $effects effects, want 6 (one per call)"
+dups=$(psql "SELECT count(*) FROM (SELECT e.idempotency_key FROM fake_effects e JOIN tool_calls t USING (call_id)
+               WHERE t.conversation_id = '$conv' GROUP BY 1 HAVING count(*) > 1) d")
+[[ "$dups" == "0" ]] || fail "$conv: $dups idempotency keys with more than one effect (I2)"
+gap=$(psql "SELECT count(*) <> max(step) OR min(step) <> 1 FROM conversation_log WHERE conversation_id = '$conv'")
+[[ "$gap" == "f" ]] || fail "$conv: conversation_log steps are not contiguous from 1 (I5)"
+gen=$(psql "SELECT max(generation) FROM tool_calls WHERE conversation_id = '$conv'")
+(( gen > 1 )) || fail "$conv: max generation $gen, want > 1 (the run never changed owner)"
+attempts=$(psql "SELECT sum(attempts) FROM tool_calls WHERE conversation_id = '$conv'")
+echo "PASS: $conv completed once across a rolling update of 2 replicas; 6 calls, $attempts attempts, $effects effects, max generation $gen"

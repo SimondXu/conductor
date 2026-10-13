@@ -532,6 +532,22 @@ documented as unsupported; Apache-2.0 attribution is unaffected.
 - **DoD**: `deploy/k8s/kind-e2e.sh`, also run in CI as the `Kind` workflow.
   It deletes the harness pod while the call is STARTED, and the reconciler
   completes the run in a new pod at the next generation (`SUCCEEDED 2`).
+- **Rolling update on Kubernetes (M7 DoD).** The same script then scales the
+  controller to 2 replicas, starts a run of six 8 s IDEMPOTENT tool turns, and
+  runs `kubectl rollout restart deploy/conductor` once the first call is
+  STARTED. Each old pod drains, cancels the run and releases its lease, and
+  another replica takes it over. The script checks that:
+  - the run completes, with one terminal event;
+  - all 6 calls are SUCCEEDED, with 6 effects and no key with two (I2);
+  - the steps are contiguous (I5);
+  - the run changed owner (generation 2 or more);
+  - no pod from before the rollout is left.
+
+  First local run: 7 attempts for 6 calls, because the call cut off by the
+  drain ran again under its key, and 6 effects at generation 2. Before this,
+  rolling updates were checked only in compose (`smoke.sh`, `make bench`).
+  The run lasts at least 48 s, and both old pods are replaced within about
+  30 s, so the owner is always replaced mid-run.
 
 ### 5.5 Harness — unchanged
 
