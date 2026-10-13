@@ -35,7 +35,7 @@ jobs:
     - name: Install kind
       run: go install sigs.k8s.io/kind@v0.33.0
 
-    - name: Delete the executor pod, expect recovery
+    - name: Delete the executor pod, then a rolling update, expect recovery
       run: PATH="$(go env GOPATH)/bin:$PATH" ./deploy/k8s/kind-e2e.sh
 
     - name: State on failure
@@ -59,7 +59,7 @@ jobs:
     - name: Install kind
       run: go install sigs.k8s.io/kind@v0.33.0
 
-    - name: Delete the executor pod under gVisor, expect recovery
+    - name: Delete the executor pod and roll the controllers under gVisor, expect recovery
       run: PATH="$(go env GOPATH)/bin:$PATH" GVISOR=1 ./deploy/k8s/kind-e2e.sh
 
     - name: State on failure
