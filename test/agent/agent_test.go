@@ -20,6 +20,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"fmt"
@@ -36,9 +37,11 @@ import (
 
 	"github.com/google/uuid"
 	_ "github.com/jackc/pgx/v5/stdlib"
+	"google.golang.org/protobuf/encoding/protojson"
 
 	schema "github.com/simondxu/conductor/db"
 	"github.com/simondxu/conductor/internal/invariant"
+	"github.com/simondxu/conductor/proto"
 )
 
 const task = "Order 1042 arrived damaged. Use the tools, one call per turn, and wait for each result: " +
@@ -48,9 +51,11 @@ const task = "Order 1042 arrived damaged. Use the tools, one call per turn, and 
 var (
 	mode      = os.Getenv("CONDUCTOR_E2E_AGENT") // mock | anthropic
 	dsn       = os.Getenv("PG_TEST_DSN")
+	modelID   = "claude-haiku-5-5"
 	bin       string // the conductor binary
 	model     *meter
-	modelBase string // the meter's URL, the harness's base_url
+	mock      *mockModel // the mock model, nil with a real one
+	modelBase string     // the meter's URL, the harness's base_url
 )
 
 func TestMain(m *testing.M) {
@@ -58,12 +63,23 @@ func TestMain(m *testing.M) {
 		fmt.Println("skipping: set CONDUCTOR_E2E_AGENT=mock|anthropic and PG_TEST_DSN (see README.md)")
 		os.Exit(0)
 	}
+	if v := os.Getenv("CONDUCTOR_E2E_MODEL"); v != "" {
+		modelID = v
+	}
+	if mode == "anthropic" && !strings.HasPrefix(modelID, haikuPrefix) {
+		fmt.Printf("CONDUCTOR_E2E_MODEL=%q: the real API may only be called with %s* models\n", modelID, haikuPrefix)
+		os.Exit(1)
+	}
 	if mode == "anthropic" && os.Getenv("ANTHROPIC_API_KEY") == "" {
 		fmt.Println("CONDUCTOR_E2E_AGENT=anthropic needs ANTHROPIC_API_KEY")
 		os.Exit(1)
 	}
 	if _, err := schema.Up(dsn); err != nil {
 		fmt.Println("migrate up:", err)
+		os.Exit(1)
+	}
+	if err := parkLeftovers(); err != nil {
+		fmt.Println("parking leftover runs:", err)
 		os.Exit(1)
 	}
 	dir, err := os.MkdirTemp("", "conductor-e2e-")
@@ -80,11 +96,12 @@ func TestMain(m *testing.M) {
 
 	upstream := "https://api.anthropic.com"
 	if mode == "mock" {
-		upstream = httptest.NewServer(mockModel{}).URL
+		mock = &mockModel{}
+		upstream = httptest.NewServer(mock).URL
 	}
-	max := 150
+	max := 250
 	fmt.Sscan(os.Getenv("CONDUCTOR_E2E_MAX_REQUESTS"), &max)
-	model = newMeter(upstream, max)
+	model = newMeter(upstream, max, mode == "anthropic")
 	srv := httptest.NewServer(model)
 	modelBase = srv.URL
 
@@ -98,6 +115,26 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
+// parkLeftovers defers, for a day, the recovery of every run an earlier
+// test run left PENDING. Otherwise this run's replicas would adopt it, call
+// this run's tool backends and model, and skew every count.
+func parkLeftovers() error {
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	res, err := db.Exec(`UPDATE runs SET next_attempt_at = now() + interval '1 day'
+		WHERE conversation_id LIKE 'e2e-agent-%' AND state = 'PENDING'`)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		fmt.Printf("parked %d PENDING run(s) left by an earlier run\n", n)
+	}
+	return nil
+}
+
 // rig is one scenario: a tool backend, a conversation, and the replicas.
 type rig struct {
 	t     *testing.T
@@ -108,6 +145,7 @@ type rig struct {
 	cfg   map[string]string // replica name -> config file
 	addr  map[string]string
 	procs map[string]*proc
+	req0  int // model requests before the scenario
 }
 
 type proc struct {
@@ -127,13 +165,14 @@ func newRig(t *testing.T) *rig {
 	t.Cleanup(func() { db.Close() })
 	r := &rig{t: t, db: db, tools: newTools(), dir: t.TempDir(),
 		conv: "e2e-agent-" + t.Name() + "-" + uuid.NewString()[:8],
-		cfg:  map[string]string{}, addr: map[string]string{}, procs: map[string]*proc{}}
+		cfg:  map[string]string{}, addr: map[string]string{}, procs: map[string]*proc{}, req0: model.count()}
+	t.Cleanup(func() { t.Logf("model requests: %d", r.modelRequests()) })
+	// A run this scenario leaves PENDING must not be adopted by a later one.
+	t.Cleanup(func() {
+		db.Exec(`UPDATE runs SET next_attempt_at = now() + interval '1 day' WHERE conversation_id = $1 AND state = 'PENDING'`, r.conv)
+	})
 	ts := httptest.NewServer(r.tools)
 	t.Cleanup(ts.Close)
-	modelID := "claude-haiku-5-5"
-	if v := os.Getenv("CONDUCTOR_E2E_MODEL"); v != "" {
-		modelID = v
-	}
 	for _, name := range []string{"a", "b"} {
 		r.addr[name] = freeAddr(t)
 		path := filepath.Join(r.dir, name+".yaml")
@@ -166,10 +205,11 @@ registry:
 // start runs `conductor serve` as replica name; chaos arms a breakpoint.
 func (r *rig) start(name, chaos string) {
 	r.t.Helper()
-	log, err := os.Create(filepath.Join(r.dir, name+".log"))
+	log, err := os.OpenFile(filepath.Join(r.dir, name+".log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		r.t.Fatal(err)
 	}
+	fmt.Fprintf(log, "--- start, CONDUCTOR_CHAOS_KILL_AT=%q\n", chaos)
 	cmd := exec.Command(bin, "serve", "--config", r.cfg[name], "--metrics-addr", "",
 		"--drain-timeout", "2s", "--recovery-interval", "500ms", "--owner-id", r.conv+"-"+name)
 	cmd.Env = append(os.Environ(), "CONDUCTOR_CHAOS_KILL_AT="+chaos)
@@ -190,12 +230,40 @@ func (r *rig) start(name, chaos string) {
 }
 
 // send starts the run on replica name and does not wait for it.
-func (r *rig) send(name string) {
-	cmd := exec.Command(bin, "run", "--server", r.addr[name], "--conversation", r.conv, "--input", task)
-	if err := cmd.Start(); err != nil {
+func (r *rig) send(name string) *client { return r.client(name, "--input", task) }
+
+// client runs `conductor run` against replica name, on the rig's
+// conversation, and does not wait for it.
+func (r *rig) client(name string, args ...string) *client {
+	r.t.Helper()
+	c := &client{cmd: exec.Command(bin, append([]string{"run", "--server", r.addr[name], "--conversation", r.conv}, args...)...),
+		done: make(chan struct{})}
+	c.cmd.Stdout, c.cmd.Stderr = &c.out, &c.out
+	if err := c.cmd.Start(); err != nil {
 		r.t.Fatal(err)
 	}
-	go cmd.Wait()
+	go func() { c.cmd.Wait(); close(c.done) }()
+	return c
+}
+
+// client is a `conductor run` process.
+type client struct {
+	cmd  *exec.Cmd
+	out  bytes.Buffer
+	done chan struct{}
+}
+
+// wait waits for the client to exit and returns its output and exit code.
+func (c *client) wait(t *testing.T) (string, int) {
+	t.Helper()
+	select {
+	case <-c.done:
+	case <-time.After(90 * time.Second):
+		c.cmd.Process.Kill()
+		<-c.done
+		t.Fatalf("client did not exit:\n%s", c.out.String())
+	}
+	return c.out.String(), c.cmd.ProcessState.ExitCode()
 }
 
 // signal sends sig to replica name and waits for it to exit.
@@ -292,20 +360,123 @@ func (r *rig) check(state string, refunds, emails int) {
 		r.t.Errorf("got %s with %d refund(s), %d email(s); want %s with %d, %d\n--- a ---\n%s\n--- b ---\n%s",
 			got, gotRefunds, gotEmails, state, refunds, emails, r.logs("a"), r.logs("b"))
 	}
+	r.invariants()
+}
+
+// invariants asserts every invariant over the conversation.
+func (r *rig) invariants() {
+	r.t.Helper()
+	for _, v := range r.violations() {
+		r.t.Error(v)
+	}
+}
+
+// violations checks every invariant over the conversation and describes
+// each one violated.
+func (r *rig) violations() []string {
+	r.t.Helper()
 	results, err := invariant.Check(context.Background(), r.db, r.conv)
 	if err != nil {
 		r.t.Fatal(err)
 	}
+	var out []string
 	for _, res := range results {
 		if res.Violations > 0 {
-			r.t.Errorf("%s violated: %s %v", res.ID, res.Assertion, res.Examples)
+			out = append(out, fmt.Sprintf("%s violated: %s %v", res.ID, res.Assertion, res.Examples))
 		}
 	}
+	return out
 }
 
 // attempts is the attempts of the last call to tool.
 func (r *rig) attempts(tool string) string {
 	return r.query(`SELECT attempts::text FROM tool_calls WHERE conversation_id = $1 AND tool_name = '` + tool + `' ORDER BY step DESC LIMIT 1`)
+}
+
+// modelRequests is how many model requests the scenario has made.
+func (r *rig) modelRequests() int { return model.count() - r.req0 }
+
+// lastStep is the run's last logged step.
+func (r *rig) lastStep() int64 {
+	n, _ := strconv.ParseInt(r.query(`SELECT last_step::text FROM runs WHERE conversation_id = $1`), 10, 64)
+	return n
+}
+
+// waitPast waits until the log has a step after step.
+func (r *rig) waitPast(step int64) {
+	r.t.Helper()
+	for deadline := time.Now().Add(30 * time.Second); r.lastStep() <= step; time.Sleep(100 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			r.t.Fatalf("nothing logged after step %d\n--- a ---\n%s\n--- b ---\n%s", step, r.logs("a"), r.logs("b"))
+		}
+	}
+}
+
+// events is the conversation's log.
+func (r *rig) events() []*proto.StepEvent {
+	r.t.Helper()
+	rows, err := r.db.Query(`SELECT payload FROM conversation_log WHERE conversation_id = $1 ORDER BY step`, r.conv)
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	defer rows.Close()
+	var out []*proto.StepEvent
+	for rows.Next() {
+		var payload string
+		ev := &proto.StepEvent{}
+		if err := rows.Scan(&payload); err != nil {
+			r.t.Fatal(err)
+		}
+		if err := (protojson.UnmarshalOptions{DiscardUnknown: true}).Unmarshal([]byte(payload), ev); err != nil {
+			r.t.Fatal(err)
+		}
+		out = append(out, ev)
+	}
+	return out
+}
+
+// history is every logged step, in order.
+func (r *rig) history() []*proto.Step {
+	var out []*proto.Step
+	for _, ev := range r.events() {
+		out = append(out, ev.Steps...)
+	}
+	return out
+}
+
+// userInputs counts the user messages in the log.
+func (r *rig) userInputs() int {
+	n := 0
+	for _, s := range r.history() {
+		if s.GetContent().GetRole() == "user" {
+			n++
+		}
+	}
+	return n
+}
+
+// skipBackoff keeps clearing the run's recovery backoff (5 s, doubling)
+// until the scenario ends, so a run that fails every recovery reaches the
+// poison guard in seconds rather than 155 s. It changes when recoveries
+// happen, not how many a run gets: next_attempt_at is the reconciler's
+// bookkeeping, not part of the runs projection (ARCHITECTURE.md §2.3). It
+// returns a func that stops it sooner.
+func (r *rig) skipBackoff() (stop func()) {
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	stop = func() { cancel(); <-done }
+	r.t.Cleanup(stop)
+	go func() {
+		defer close(done)
+		for ctx.Err() == nil {
+			r.db.ExecContext(ctx, `UPDATE runs SET next_attempt_at = NULL WHERE conversation_id = $1 AND next_attempt_at IS NOT NULL`, r.conv)
+			select {
+			case <-ctx.Done():
+			case <-time.After(100 * time.Millisecond):
+			}
+		}
+	}()
+	return stop
 }
 
 func freeAddr(t *testing.T) string {

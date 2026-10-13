@@ -25,6 +25,7 @@ import (
 	"github.com/simondxu/conductor/internal/controller/eventlog"
 	"github.com/simondxu/conductor/internal/controller/lease"
 	"github.com/simondxu/conductor/internal/controller/toolledger"
+	"github.com/simondxu/conductor/internal/harness"
 	"github.com/simondxu/conductor/internal/telemetry"
 	"github.com/simondxu/conductor/proto"
 	"go.opentelemetry.io/otel/attribute"
@@ -211,6 +212,15 @@ func (d *Controller) poison(ctx context.Context, id string) error {
 	if err != nil || st.State != proto.State_STATE_PENDING {
 		return err
 	}
+	// The run fails like any other (recoverCalls): each call it leaves
+	// unanswered whose outcome is unknown is abandoned, and every unanswered
+	// call gets an error result in the FAILED event, so the history stays
+	// answerable and the conversation can take new input.
+	open := harness.UnansweredToolCalls(st.History)
+	unanswered := map[string]bool{}
+	for _, c := range open {
+		unanswered[c.GetId()] = true
+	}
 	calls, err := d.ledger.Calls(ctx, id)
 	if err != nil {
 		return err
@@ -220,11 +230,21 @@ func (d *Controller) poison(ctx context.Context, id string) error {
 			if err := d.ledger.MarkUnknown(ctx, gen, c.CallID, "recovery poisoned"); err != nil {
 				return err
 			}
+			c.State = toolledger.OutcomeUnknown
 		}
+		if c.State == toolledger.OutcomeUnknown && unanswered[c.CallID] {
+			if err := d.ledger.Settle(ctx, gen, c.CallID, toolledger.Outcome{State: toolledger.Abandoned, Error: "outcome unknown and the run's recovery was poisoned"}); err != nil {
+				return err
+			}
+		}
+	}
+	var failed []*proto.Step
+	for _, c := range open {
+		failed = append(failed, errorResult(c, "not completed: the run failed because its recovery failed repeatedly"))
 	}
 	l := newLogger(d.eventLog, id, "")
 	l.gen = gen
-	if _, err := l.LogOutputs(ctx, nil, proto.State_STATE_FAILED); err != nil {
+	if _, err := l.LogOutputs(ctx, failed, proto.State_STATE_FAILED); err != nil {
 		return err
 	}
 	recoveryPoisoned.Inc()

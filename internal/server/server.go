@@ -18,6 +18,7 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -45,13 +46,43 @@ type Server struct {
 	grpcServer *grpc.Server
 	inFlight   map[string]struct{}
 	inFlightMu sync.Mutex
+	// runs is canceled by Stop. A run outlives its client, not the server.
+	runs     context.Context
+	stopRuns context.CancelFunc
 }
 
 // New creates a new controller server.
 func New(c *controller.Controller) *Server {
+	runs, stopRuns := context.WithCancel(context.Background())
 	return &Server{
 		controller: c,
 		inFlight:   make(map[string]struct{}),
+		runs:       runs,
+		stopRuns:   stopRuns,
+	}
+}
+
+// runContext is ctx without its cancellation, canceled by Stop instead: a
+// run carries on when its client goes away (PRD.md §6.2) and is canceled
+// only when the server stops, after its drain.
+func (s *Server) runContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	stop := context.AfterFunc(s.runs, cancel)
+	return ctx, func() { stop(); cancel() }
+}
+
+// send is an ExecHandler for stream. Once the client is gone it drops what
+// it cannot send instead of failing the run: every step is in the log, and
+// the client can re-attach.
+func send(ctx context.Context, stream grpc.ServerStreamingServer[proto.CreateInteractionResponse]) controller.ExecHandler {
+	return func(resp *proto.CreateInteractionResponse) error {
+		if ctx.Err() != nil {
+			return nil
+		}
+		if err := stream.Send(resp); err != nil && ctx.Err() == nil {
+			return err
+		}
+		return nil
 	}
 }
 
@@ -68,10 +99,9 @@ func (s *Server) CreateInteraction(req *proto.CreateInteractionEvent, stream grp
 	}
 	defer cleanup()
 
-	outputHandler := controller.ExecHandler(func(resp *proto.CreateInteractionResponse) error {
-		return stream.Send(resp)
-	})
-	err := s.controller.Exec(ctx, req, outputHandler)
+	runCtx, cancel := s.runContext(ctx)
+	defer cancel()
+	err := s.controller.Exec(runCtx, req, send(ctx, stream))
 	if errors.Is(err, lease.ErrHeld) {
 		// Another replica or the reconciler is driving it (PRD.md §6.1).
 		return status.Errorf(codes.FailedPrecondition, "conversation %q is already in flight: %v", req.ConversationId, err)
@@ -108,8 +138,10 @@ func (s *Server) Attach(req *proto.AttachRequest, stream grpc.ServerStreamingSer
 		busy = true
 		driving.Go(func() {
 			defer cleanup()
-			err := s.controller.Exec(ctx, &proto.CreateInteractionEvent{ConversationId: req.ConversationId}, nil)
-			if err != nil && !errors.Is(err, lease.ErrHeld) && ctx.Err() == nil {
+			runCtx, cancel := s.runContext(ctx)
+			defer cancel()
+			err := s.controller.Exec(runCtx, &proto.CreateInteractionEvent{ConversationId: req.ConversationId}, nil)
+			if err != nil && !errors.Is(err, lease.ErrHeld) && runCtx.Err() == nil {
 				slog.WarnContext(ctx, "Resuming an attached run failed", slog.String("conversation_id", req.ConversationId), slog.Any("error", err))
 			}
 			mu.Lock()
@@ -164,8 +196,9 @@ func (s *Server) GracefulStop() {
 	}
 }
 
-// Stop closes every connection and cancels the RPCs in flight.
+// Stop closes every connection and cancels the RPCs and runs in flight.
 func (s *Server) Stop() {
+	s.stopRuns()
 	if s.grpcServer != nil {
 		s.grpcServer.Stop()
 	}
