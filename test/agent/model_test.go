@@ -301,6 +301,8 @@ func newMeter(upstream string, maxRequests int, haikuOnly bool) *meter {
 		Rewrite: func(r *httputil.ProxyRequest) {
 			r.SetURL(u)
 			r.Out.Host = u.Host
+			// Uncompressed, so observe can read the usage block.
+			r.Out.Header.Del("Accept-Encoding")
 		},
 		ModifyResponse: m.observe,
 	}

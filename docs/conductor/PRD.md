@@ -361,8 +361,15 @@ What it does:
 
 Not supported: `redacted_thinking` and server-tool blocks (the turn fails, since
 a block that cannot be logged cannot be sent back), streaming, and fallbacks.
-It has been tested only against a local fake of the Messages API; no run
-against the real API is recorded, so §3.4 has no Anthropic row.
+**Real-API run (2026-10-12).** `test/agent` ran its 24 real-model scenarios
+against `claude-haiku-5-5` at effort `max`, and all passed (`test/agent/README.md`).
+They cover crashes at every chaos boundary, a refund done with its result
+lost, an email sent with its result lost, graceful and ungraceful takeover, a
+double fault, follow-up user turns, and a client disconnect. The run made 105
+requests with 0 errors. 61 signed thinking blocks were sent back and accepted,
+including after recovery. At Haiku's default effort it does not think on this
+task, so the signature check needs `max`. This is a correctness run, not a
+benchmark, so the §8 tables do not include it.
 
 ---
 
