@@ -16,6 +16,7 @@ package agent
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -41,6 +42,10 @@ type tools struct {
 	slow    string
 	delay   time.Duration
 	started chan struct{}
+	// fail names a tool whose next request is answered 503, once;
+	// failAfterEffect makes it do its effect first.
+	fail            string
+	failAfterEffect bool
 }
 
 func newTools() *tools {
@@ -50,7 +55,10 @@ func newTools() *tools {
 
 func (t *tools) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	name := strings.TrimPrefix(r.URL.Path, "/")
-	io.Copy(io.Discard, r.Body)
+	var args struct {
+		OrderID string `json:"order_id"`
+	}
+	json.NewDecoder(r.Body).Decode(&args)
 	key := r.Header.Get("Idempotency-Key")
 
 	t.mu.Lock()
@@ -60,6 +68,10 @@ func (t *tools) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		t.slow = ""
 		close(t.started)
 	}
+	fail := t.fail == name
+	if fail {
+		t.fail = ""
+	}
 	t.mu.Unlock()
 	if slow {
 		select {
@@ -68,17 +80,21 @@ func (t *tools) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if fail && !t.failAfterEffect {
+		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+		return
+	}
 
 	t.mu.Lock()
 	var resp string
 	switch name {
 	case "lookup_order":
-		resp = `{"order_id":"1042","amount_cents":4200,"currency":"USD","email":"ana@example.com","status":"delivered_damaged"}`
+		resp = fmt.Sprintf(`{"order_id":%q,"amount_cents":4200,"currency":"USD","email":"ana@example.com","status":"delivered_damaged"}`, args.OrderID)
 	case "refund_payment":
 		if prev, ok := t.refunds[key]; ok {
 			resp = prev // the same refund again: no second effect
 		} else {
-			resp = `{"refund_id":"rf_` + key[:8] + `","status":"refunded","amount_cents":4200}`
+			resp = fmt.Sprintf(`{"refund_id":"rf_%s","order_id":%q,"status":"refunded","amount_cents":4200}`, key[:8], args.OrderID)
 			t.refunds[key] = resp
 		}
 	case "send_email":
@@ -97,6 +113,10 @@ func (t *tools) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	t.mu.Unlock()
 	if hang {
 		<-r.Context().Done() // the effect happened; the caller never hears of it
+		return
+	}
+	if fail {
+		http.Error(w, "service unavailable", http.StatusServiceUnavailable) // the effect happened anyway
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
