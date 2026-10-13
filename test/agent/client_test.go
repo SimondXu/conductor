@@ -165,14 +165,6 @@ func TestClientDisconnectDuringUnsafeCall(t *testing.T) {
 	c := r.send("a")
 	waitFor(t, r.tools.started, "the email request")
 	c.cmd.Process.Kill()
-	state := r.waitState(90 * time.Second)
-	refunds, emails, _ := r.tools.counts()
-	if state == "FAILED" && emails == 0 && strings.HasSuffix(r.ledger(), "send_email:ABANDONED:1") {
-		t.Skipf("BUG (Conductor, reported): the client's disconnect cancelled the in-flight email (CreateInteraction runs Exec "+
-			"on the gRPC stream context), so it was never sent, its call became OUTCOME_UNKNOWN and then ABANDONED, and the run "+
-			"FAILED instead of completing. State %s, %d refund(s), %d email(s), ledger %s, invariant violations %v.\n--- a ---\n%s",
-			state, refunds, emails, r.ledger(), r.violations(), r.logs("a"))
-	}
 	r.check("COMPLETED", 1, 1)
 }
 

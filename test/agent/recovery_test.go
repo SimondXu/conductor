@@ -239,17 +239,12 @@ func TestRecoveryCrashLoop(t *testing.T) {
 		t.Errorf("%d model requests, want 2", n)
 	}
 
-	unanswered := harness.UnansweredToolCalls(r.history())
+	if open := harness.UnansweredToolCalls(r.history()); len(open) != 0 {
+		t.Fatalf("the poisoned run left %d call(s) unanswered", len(open))
+	}
 	r.start("b", "")
 	out, code := r.client("b", "--input", thanks).wait(t)
 	out = ansi.ReplaceAllString(out, "")
-	if len(unanswered) > 0 && code != 0 {
-		t.Skipf("BUG (Conductor, reported): the poison guard fails the run with its %s call unanswered. "+
-			"poison() (internal/controller/reconciler.go) appends STATE_FAILED with no error result, unlike recoverCalls, "+
-			"so the history stays open and new input is refused for good: \"resume it first\", but no resume runs a FAILED run. "+
-			"Invariants: %v. Follow-up client, exit %d:\n%s",
-			unanswered[0].GetFunctionCall().GetName(), r.violations(), code, out)
-	}
 	if code != 0 {
 		t.Fatalf("follow-up after the poisoned run: exit %d\n%s", code, out)
 	}

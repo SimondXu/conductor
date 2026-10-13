@@ -607,8 +607,12 @@ never a second code path.
 - **Poison:** after `MaxAttempts` (5) recoveries, the run is failed by
   appending `STATE_FAILED` under its lease, never by writing `runs` directly.
   Its `STARTED` calls become `OUTCOME_UNKNOWN`, so their deadline still bounds
-  them. `recovery_attempts` is never reset, so a run gets 5 recoveries in its
-  lifetime. Backoff is 5 s doubling, capped at 5 min.
+  them. Like any failed run it closes its history: each unanswered call whose
+  outcome is unknown is `ABANDONED`, and every unanswered call gets an error
+  result in the `FAILED` event, so the conversation can take new input
+  (`TestReconciler_PoisonClosesUnansweredCalls`). `recovery_attempts` is
+  never reset, so a run gets 5 recoveries in its lifetime; it counts per
+  conversation, across user turns. Backoff is 5 s doubling, capped at 5 min.
 - **`serve` runs the loop on PostgreSQL only.** On SQLite it logs that
   ownership is process-local. `eventlog.postgres.lease_ttl` (default 30 s)
   sets how long a killed controller's runs wait; compose uses 5 s.
@@ -1055,8 +1059,11 @@ controller boundaries (one injection each).
 **Graceful handover.**
 - First measurement: 6.5–10.4 s. The released run waited for another
   replica's next reconciler pass, a 5 s interval plus jitter.
-- Since then, an `Exec` whose caller went away (a drain, a client
-  disconnect) sends `NOTIFY conductor_handover` after its `Release`. Every
+- Since then, an `Exec` whose caller went away (a drain) sends
+  `NOTIFY conductor_handover` after its `Release`. A client disconnect no
+  longer cancels the run: the server runs `Exec` on a context that only its
+  `Stop` cancels, after the drain, so the owner carries the run on as
+  PRD §6.2 says (`TestCreateInteraction_ClientDisconnectDoesNotCancelRun`). Every
   replica's reconciler `LISTEN`s and starts a pass at once.
 - A recovery that loses the lease (`held`) or is cut off by its own
   replica's shutdown (`canceled`) is refunded. Before this it set a backoff,

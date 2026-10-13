@@ -61,17 +61,17 @@ are model requests in mock mode.
 | `TestClientDisconnectDuringUnsafeCall` | the client is killed while the email request is in flight | COMPLETED 1/1: the run keeps going to the end of the turn | PRD §6.2 | both | 3 |
 | `TestMeterAllowsOnlyHaiku` | non-Haiku model through the meter | refused locally with 400, and the run aborts | — | mock | 0 |
 
-**Known Conductor bugs.** Two scenarios observe behaviour the docs rule out.
-Each skips with `BUG (Conductor, reported)` and the evidence, and passes once
-the bug is fixed:
+**Bugs these scenarios found, now fixed.**
 
-- `TestClientDisconnectDuringUnsafeCall`: `CreateInteraction` runs `Exec` on
-  the client's stream context, so a client that goes away cancels the email
-  request in flight. The call goes `OUTCOME_UNKNOWN`, recovery abandons it,
-  and the run ends `FAILED` with no email.
-- `TestRecoveryCrashLoop`: the poison guard appends `STATE_FAILED` without an
-  error result for the call left unanswered, so the history stays open (the
-  I6 check fails) and every later input is refused as "an unfinished run".
+- `TestClientDisconnectDuringUnsafeCall`: `CreateInteraction` ran `Exec` on
+  the client's stream context, so a client that went away cancelled the
+  email request in flight, and the run ended `FAILED` with no email. Runs
+  now outlive their client and are cancelled only by the server's `Stop`,
+  after its drain.
+- `TestRecoveryCrashLoop`: the poison guard appended `STATE_FAILED` without
+  an error result for the call left unanswered, so the history stayed open
+  and every later input was refused. It now closes the history the way any
+  failed run does.
 
 The poison scenarios clear the run's `next_attempt_at` as they go, so five
 recoveries take seconds rather than the 155 s of backoff. That changes when

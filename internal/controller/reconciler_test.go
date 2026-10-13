@@ -295,6 +295,66 @@ func TestReconciler_PoisonsRunThatKeepsFailing(t *testing.T) {
 	}
 }
 
+// A poisoned run whose history ends in a call that never got its result is
+// closed like any failed run: the call is ABANDONED and gets an error result
+// in the FAILED event, so the conversation can take new input.
+func TestReconciler_PoisonClosesUnansweredCalls(t *testing.T) {
+	r := newRecRig(t, func(reg *Registry, _ *fake.MemoryEffects) {
+		broken := &testHarness{startFunc: func(context.Context, string) (harness.Execution, error) {
+			return nil, errors.New("harness unavailable")
+		}}
+		if err := reg.Register("broken", broken, RecoveryFull); err != nil {
+			t.Fatal(err)
+		}
+	})
+	ctx := context.Background()
+	call := &proto.Step{Type: &proto.Step_ToolCall{ToolCall: &proto.ToolCallStep{
+		Type: &proto.ToolCallStep_FunctionCall{FunctionCall: &proto.FunctionCallStep{Name: "charge_card"}},
+	}}}
+	p, err := plannedCall(r.conv, 1, call.GetToolCall())
+	if err != nil {
+		t.Fatal(err)
+	}
+	call.GetToolCall().Id = p.CallID
+	if _, err := r.log.Append(ctx, &proto.StepEvent{
+		ConversationId: r.conv, EventId: uuid.NewString(), AgentId: "broken", State: proto.State_STATE_PENDING,
+		Steps: []*proto.Step{harnesstest.UserStep("go"), call},
+	}, 0); err != nil {
+		t.Fatal(err)
+	}
+	p.Class = toolledger.Idempotent
+	if err := r.ledger.Plan(ctx, 0, p); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.ledger.Start(ctx, 0, p.CallID); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := ReconcilerConfig{Concurrency: 4, MaxAttempts: 1}
+	for range 2 {
+		if err := r.c.reconcileOnce(ctx, r.runs, cfg); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := r.db.Exec("UPDATE runs SET next_attempt_at = NULL WHERE conversation_id = $1", r.conv); err != nil {
+			t.Fatal(err)
+		}
+	}
+	st := rebuilt(t, r.log, r.conv)
+	if st.State != proto.State_STATE_FAILED {
+		t.Fatalf("state = %v, want FAILED", st.State)
+	}
+	if open := harness.UnansweredToolCalls(st.History); len(open) != 0 {
+		t.Fatalf("a poisoned run left %d call(s) unanswered", len(open))
+	}
+	calls, err := r.ledger.Calls(ctx, r.conv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(calls) != 1 || calls[0].State != toolledger.Abandoned {
+		t.Fatalf("ledger = %+v, want the call ABANDONED", calls)
+	}
+}
+
 // A client cannot drive a conversation another owner holds.
 func TestExec_RefusedWhileLeaseHeld(t *testing.T) {
 	r := newRecRig(t, func(reg *Registry, effects *fake.MemoryEffects) {
